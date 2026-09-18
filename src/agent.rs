@@ -27,43 +27,67 @@ enum Event {
     AgentRequest(Id, String, Value),
 }
 
+/// Live sink for streaming agent updates as they arrive, in agent order.
+/// Called from the prompt loop; returns `Err` when the downstream consumer
+/// is gone (client disconnected) so the turn can stop early.
+pub type TurnCallback<'a> = &'a mut (dyn FnMut(TurnEvent) -> anyhow::Result<()> + Send);
+
+/// What the prompt loop streams out live.
+#[derive(Debug)]
+pub enum TurnEvent<'a> {
+    /// Visible answer text chunk.
+    Message(&'a str),
+    /// Visible reasoning text chunk.
+    Thought(&'a str),
+}
+
 /// How the driver answers agent-initiated requests.
 pub enum Policy {
     /// Auto-approve permission requests by picking the first `allow_*` option.
     ApproveAll,
+    /// Keep the agent inside its sandbox: pick the first `reject_*` option so
+    /// sandbox-escape escalations are denied and the agent adapts instead.
+    Sandbox,
 }
 
 impl Policy {
     fn answer(&self, method: &str, params: &Value) -> Value {
         match (self, method) {
             (Policy::ApproveAll, "session/request_permission") => {
-                // Pick the first option whose kind is allow_once/allow_always,
-                // falling back to the first listed option. Never hardcode ids.
-                let options = params
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let chosen = options
-                    .iter()
-                    .find(|o| {
-                        o.get("kind").and_then(Value::as_str)
-                            .is_some_and(|k| k.starts_with("allow"))
-                    })
-                    .or_else(|| options.first());
-                match chosen.and_then(|o| o.get("optionId").and_then(Value::as_str)) {
-                    Some(option_id) => json!({
-                        "outcome": { "outcome": "selected", "optionId": option_id }
-                    }),
-                    // Malformed request: no options at all. Fail visibly.
-                    None => error_result(-32602, "no permission options provided"),
-                }
+                choose_permission_option(params, "allow")
+            }
+            (Policy::Sandbox, "session/request_permission") => {
+                choose_permission_option(params, "reject")
             }
             // fs/terminal/elicitation: we advertised these capabilities as off.
             // A compliant agent never sends them; answer with a JSON-RPC error
             // so a non-compliant one fails fast instead of hanging.
             (_, m) => error_result(-32601, &format!("gateway does not support `{m}`")),
         }
+    }
+}
+
+/// Pick the first option whose `kind` starts with `want` (allow_/reject_),
+/// falling back to the first listed option. Never hardcode ids.
+fn choose_permission_option(params: &Value, want: &str) -> Value {
+    let options = params
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let chosen = options
+        .iter()
+        .find(|o| {
+            o.get("kind").and_then(Value::as_str)
+                .is_some_and(|k| k.starts_with(want))
+        })
+        .or_else(|| options.first());
+    match chosen.and_then(|o| o.get("optionId").and_then(Value::as_str)) {
+        Some(option_id) => json!({
+            "outcome": { "outcome": "selected", "optionId": option_id }
+        }),
+        // Malformed request: no options at all. Fail visibly.
+        None => error_result(-32602, "no permission options provided"),
     }
 }
 
@@ -274,14 +298,17 @@ impl AgentProcess {
         Ok(SessionInfo { session_id, models })
     }
 
-    /// Run one prompt turn: send `session/prompt`, drain agent updates in
-    /// order (answering agent-initiated requests via `policy`), return the
-    /// collected text when the prompt response arrives.
+    /// Run one prompt turn: send `session/prompt`, stream agent updates
+    /// through `on_event` in order (answering agent-initiated requests via
+    /// `policy`), return the collected text when the prompt response arrives.
+    /// A callback error aborts the turn (the HTTP layer uses this when the
+    /// client has disconnected).
     pub async fn prompt(
         &mut self,
         session_id: &str,
         text: &str,
         policy: &Policy,
+        on_event: TurnCallback<'_>,
     ) -> anyhow::Result<TurnOutcome> {
         let prompt_id = self
             .send_request(
@@ -297,12 +324,12 @@ impl AgentProcess {
         // Updates that arrived before this call (shouldn't happen, but order
         // is order): they belong to this conversation's stream.
         for u in std::mem::take(&mut self.queued_updates) {
-            Self::collect(u, &mut text_out);
+            Self::handle_live(u, &mut text_out, on_event)?;
         }
 
         loop {
             match self.events.recv().await.context("agent connection closed mid-turn")? {
-                Event::Update(u) => Self::collect(u, &mut text_out),
+                Event::Update(u) => Self::handle_live(u, &mut text_out, on_event)?,
                 Event::AgentRequest(req_id, req_method, req_params) => {
                     let result = policy.answer(&req_method, &req_params);
                     self.reply(req_id, result).await?;
@@ -314,19 +341,34 @@ impl AgentProcess {
                     let resp: PromptResponse = serde_json::from_value(
                         payload.map_err(|e| anyhow::anyhow!("prompt error {}: {}", e.code, e.message))?,
                     )
-                    .unwrap_or(PromptResponse { stop_reason: "unknown".into() });
-                    return Ok(TurnOutcome { text: text_out, stop_reason: resp.stop_reason });
+                    .unwrap_or(PromptResponse { stop_reason: "unknown".into(), usage: None });
+                    return Ok(TurnOutcome {
+                        text: text_out,
+                        stop_reason: resp.stop_reason,
+                        usage: resp.usage,
+                    });
                 }
             }
         }
     }
 
-    fn collect(update: Update, text_out: &mut String) {
-        if let Update::AgentMessageChunk { content } = update
-            && content.r#type == "text"
-        {
-            text_out.push_str(&content.text);
+    /// One update: append message text, stream chunks through `on_event`.
+    fn handle_live(
+        update: Update,
+        text_out: &mut String,
+        on_event: TurnCallback<'_>,
+    ) -> anyhow::Result<()> {
+        match update {
+            Update::AgentMessageChunk { content } if content.r#type == "text" => {
+                text_out.push_str(&content.text);
+                on_event(TurnEvent::Message(&content.text))?;
+            }
+            Update::AgentThoughtChunk { content } if content.r#type == "text" => {
+                on_event(TurnEvent::Thought(&content.text))?;
+            }
+            _ => {}
         }
+        Ok(())
     }
 
     async fn reply(&mut self, id: Id, result: Value) -> anyhow::Result<()> {
@@ -348,8 +390,68 @@ impl AgentProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_models;
-    use serde_json::json;
+    use super::{Policy, extract_models};
+    use serde_json::{Value, json};
+
+    fn perm_request(options: Value) -> Value {
+        json!({
+            "sessionId": "s1",
+            "toolCall": { "toolCallId": "call_1" },
+            "options": options
+        })
+    }
+
+    fn outcome_option_id(answer: Value) -> String {
+        answer
+            .get("outcome")
+            .and_then(|o| o.get("optionId"))
+            .and_then(Value::as_str)
+            .expect("selected outcome with optionId")
+            .to_string()
+    }
+
+    #[test]
+    fn sandbox_policy_rejects_even_when_reject_listed_last() {
+        let params = perm_request(json!([
+            { "optionId": "approved", "name": "Yes, proceed", "kind": "allow_once" },
+            { "optionId": "approved-amendment", "name": "Yes, always", "kind": "allow_always" },
+            { "optionId": "abort", "name": "No", "kind": "reject_once" }
+        ]));
+        let answer = Policy::Sandbox.answer("session/request_permission", &params);
+        assert_eq!(outcome_option_id(answer), "abort");
+    }
+
+    #[test]
+    fn approve_all_policy_still_picks_allow_over_first_listed() {
+        let params = perm_request(json!([
+            { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" },
+            { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" }
+        ]));
+        let answer = Policy::ApproveAll.answer("session/request_permission", &params);
+        assert_eq!(outcome_option_id(answer), "allow-once");
+    }
+
+    #[test]
+    fn sandbox_policy_without_reject_option_falls_back_to_first_listed() {
+        let params = perm_request(json!([
+            { "optionId": "approved", "name": "Yes, proceed", "kind": "allow_once" },
+            { "optionId": "approved-always", "name": "Yes, always", "kind": "allow_always" }
+        ]));
+        let answer = Policy::Sandbox.answer("session/request_permission", &params);
+        assert_eq!(outcome_option_id(answer), "approved");
+    }
+
+    #[test]
+    fn no_options_yields_invalid_params_error() {
+        let answer = Policy::ApproveAll.answer("session/request_permission", &json!({}));
+        assert_eq!(answer["code"], -32602);
+    }
+
+    #[test]
+    fn unknown_agent_request_is_rejected_with_method_not_found() {
+        let answer = Policy::Sandbox.answer("fs/read_text_file", &json!({ "path": "/etc/passwd" }));
+        assert_eq!(answer["code"], -32601);
+    }
 
     #[test]
     fn extracts_model_category_select_options() {

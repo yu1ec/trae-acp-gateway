@@ -10,6 +10,11 @@ import json
 import sys
 import time
 
+# Usage: mock_agent.py [sandbox]
+# With "sandbox", the permission handler expects the gateway to pick the
+# reject option (gateway --sandbox) instead of the allow option.
+SANDBOX_MODE = len(sys.argv) > 1 and sys.argv[1] == "sandbox"
+
 
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -81,13 +86,24 @@ def main():
             def handle_permission(perm_result):
                 outcome = perm_result["outcome"]
                 assert outcome["outcome"] == "selected", f"unexpected outcome {outcome}"
-                # The gateway must pick the allow option, not the first listed.
-                assert outcome["optionId"] == "allow-once", \
-                    f"gateway approved the wrong option: {outcome['optionId']}"
+                # Sandbox mode: gateway must reject; default: must pick the
+                # allow option, not the first listed.
+                expected = "reject-once" if SANDBOX_MODE else "allow-once"
+                assert outcome["optionId"] == expected, \
+                    f"gateway approved the wrong option: {outcome['optionId']} (want {expected})"
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": session_id,
                     "update": {"sessionUpdate": "tool_call_update", "toolCallId": "call_1",
                                "status": "completed"},
+                }})
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": session_id,
+                    "update": {"sessionUpdate": "usage_update", "used": 4242, "size": 190000},
+                }})
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": session_id,
+                    "update": {"sessionUpdate": "agent_thought_chunk",
+                               "content": {"type": "text", "text": "thinking..."}},
                 }})
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": session_id,
@@ -99,7 +115,12 @@ def main():
                     "update": {"sessionUpdate": "agent_message_chunk",
                                "content": {"type": "text", "text": " (done)"}},
                 }})
-                reply(id, {"stopReason": "end_turn"})
+                reply(id, {
+                    "stopReason": "end_turn",
+                    "usage": {"totalTokens": 4242, "inputTokens": 4000,
+                              "outputTokens": 242, "thoughtTokens": 17,
+                              "cachedReadTokens": 0, "cachedWriteTokens": 0},
+                })
 
             return handle_permission
         else:

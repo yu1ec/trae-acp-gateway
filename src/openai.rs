@@ -95,8 +95,8 @@ pub fn models_response(models: &[crate::agent::ModelInfo]) -> Value {
     json!({ "object": "list", "data": data })
 }
 
-pub fn chat_response(id: &str, text: &str, finish: &str) -> Value {
-    json!({
+pub fn chat_response(id: &str, text: &str, finish: &str, usage: Option<&crate::acp::Usage>) -> Value {
+    let mut resp = json!({
         "id": id,
         "object": "chat.completion",
         "created": unix_now(),
@@ -106,13 +106,36 @@ pub fn chat_response(id: &str, text: &str, finish: &str) -> Value {
             "message": { "role": "assistant", "content": text },
             "finish_reason": finish,
         }],
-        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
+        "usage": usage_json(usage),
+    });
+    resp["choices"][0]["message"]["reasoning_content"] = Value::Null;
+    resp
+}
+
+/// OpenAI `usage` object. Without agent numbers we report the shape with
+/// zeros — a missing/null `usage` makes streaming clients (e.g. omp) show a
+/// `-1%` context instead of an honest value.
+pub fn usage_json(usage: Option<&crate::acp::Usage>) -> Value {
+    let u = usage.cloned().unwrap_or_default();
+    json!({
+        "prompt_tokens": u.input_tokens,
+        "completion_tokens": u.output_tokens,
+        "total_tokens": u.total_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": u.cached_read_tokens,
+            "reasoning_tokens": u.thought_tokens,
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": u.thought_tokens,
+        },
     })
 }
 
-/// One SSE chunk of a streamed chat completion.
-pub fn chat_chunk(id: &str, delta: Value, finish: Option<&str>) -> Value {
-    json!({
+/// One SSE chunk of a streamed chat completion. `usage` attaches only to the
+/// final chunk (OpenAI `stream_options.include_usage` shape); omp reads it to
+/// compute context-window percentage.
+pub fn chat_chunk(id: &str, delta: Value, finish: Option<&str>, usage: Option<&crate::acp::Usage>) -> Value {
+    let mut chunk = json!({
         "id": id,
         "object": "chat.completion.chunk",
         "created": unix_now(),
@@ -122,7 +145,11 @@ pub fn chat_chunk(id: &str, delta: Value, finish: Option<&str>) -> Value {
             "delta": delta,
             "finish_reason": finish,
         }],
-    })
+    });
+    if let Some(u) = usage {
+        chunk["usage"] = usage_json(Some(u));
+    }
+    chunk
 }
 
 pub fn error_response(message: &str, code: u16) -> Value {

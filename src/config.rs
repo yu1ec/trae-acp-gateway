@@ -21,6 +21,11 @@ pub struct Config {
     #[arg(long, value_delimiter = ',', default_value = "acp,serve")]
     pub trae_args: Vec<String>,
 
+    /// Keep the agent inside its sandbox: deny permission requests that
+    /// escalate beyond it instead of approving them. Disable with `--sandbox=false`.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub sandbox: bool,
+
     /// Log every raw JSON-RPC line exchanged with the agent.
     #[arg(long)]
     pub debug: bool,

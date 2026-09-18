@@ -39,45 +39,23 @@ pub async fn chat_completions(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
     let cfg = cfg.clone();
     tokio::spawn(async move {
-        let result = run_turn(&cfg, &prompt).await;
-        let stream = |ev: Event| async {
-            if tx.send(Ok(ev)).await.is_err() {
-                tracing::debug!("client disconnected; dropping turn output");
-            }
-        };
-
+        let result = run_turn_streaming(&cfg, &prompt, &completion_id, &tx).await;
         match result {
             Ok((_, outcome)) => {
-                stream(Event::default().data(
-                    chat_chunk(
-                        &completion_id,
-                        serde_json::json!({ "role": "assistant", "content": "" }),
-                        None,
-                    )
-                    .to_string(),
-                ))
-                .await;
-                stream(Event::default().data(
-                    chat_chunk(
-                        &completion_id,
-                        serde_json::json!({ "content": outcome.text }),
-                        None,
-                    )
-                    .to_string(),
-                ))
-                .await;
-                stream(Event::default().data(
-                    chat_chunk(
-                        &completion_id,
-                        serde_json::json!({}),
-                        Some(finish_reason(&outcome.stop_reason)),
-                    )
-                    .to_string(),
-                ))
-                .await;
+                // Finish chunk carries the OpenAI `usage` — streaming clients
+                // (omp) read it to compute context-window percentage.
                 let _ = tx
-                    .send(Ok(Event::default().data("[DONE]")))
+                    .send(Ok(Event::default().data(
+                        chat_chunk(
+                            &completion_id,
+                            serde_json::json!({}),
+                            Some(finish_reason(&outcome.stop_reason)),
+                            outcome.usage.as_ref(),
+                        )
+                        .to_string(),
+                    )))
                     .await;
+                let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
             }
             Err(e) => {
                 tracing::error!(error = %e, "turn failed");
@@ -94,15 +72,97 @@ pub async fn chat_completions(
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
 }
 
+/// Drive one full ACP turn with live streaming: spawn, session/new, prompt.
+/// Each agent chunk is forwarded as an OpenAI delta the moment it arrives;
+/// thought chunks stream as `reasoning_content`. Returns `Err` (client gone)
+/// when the SSE consumer dropped.
+async fn run_turn_streaming(
+    cfg: &Config,
+    prompt: &str,
+    completion_id: &str,
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
+    let policy = if cfg.sandbox { Policy::Sandbox } else { Policy::ApproveAll };
+    let mut agent = AgentProcess::spawn(&cfg.trae_cmd, &cfg.trae_args, &cfg.workdir).await?;
+    let result = async {
+        let info = agent.new_session(&cfg.workdir).await?;
+
+        // Role-opening delta, then forward agent chunks as they arrive.
+        let opened = tx
+            .send(Ok(Event::default().data(
+                chat_chunk(
+                    completion_id,
+                    serde_json::json!({ "role": "assistant", "content": "" }),
+                    None,
+                    None,
+                )
+                .to_string(),
+            )))
+            .await
+            .is_ok();
+        if !opened {
+            anyhow::bail!("client disconnected before first delta");
+        }
+
+        let mut client_gone = false;
+        let outcome = {
+            let tx = tx.clone();
+            let completion_id = completion_id.to_string();
+            agent
+                .prompt(&info.session_id, prompt, &policy, &mut |ev| {
+                    let ev = match ev {
+                        crate::agent::TurnEvent::Message(text) => chat_chunk(
+                            &completion_id,
+                            serde_json::json!({ "content": text }),
+                            None,
+                            None,
+                        ),
+                        crate::agent::TurnEvent::Thought(text) => chat_chunk(
+                            &completion_id,
+                            serde_json::json!({ "reasoning_content": text }),
+                            None,
+                            None,
+                        ),
+                    };
+                    // try_send, never blocking_send: we run inside the async
+                    // runtime. A full 64-slot buffer means the SSE consumer
+                    // is gone or wedged — abort the turn either way.
+                    match tx.try_send(Ok(Event::default().data(ev.to_string()))) {
+                        Ok(()) => Ok(()),
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            client_gone = true;
+                            anyhow::bail!("SSE buffer full; aborting turn")
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            client_gone = true;
+                            anyhow::bail!("client disconnected mid-turn")
+                        }
+                    }
+                })
+                .await
+        };
+        if client_gone {
+            anyhow::bail!("client disconnected mid-turn");
+        }
+        outcome.map(|outcome| (info, outcome))
+    }
+    .await;
+    agent.shutdown().await;
+    result
+}
+
 /// Drive one full ACP turn: spawn, session/new, prompt, shutdown.
 async fn run_turn(
     cfg: &Config,
     prompt: &str,
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
+    let policy = if cfg.sandbox { Policy::Sandbox } else { Policy::ApproveAll };
     let mut agent = AgentProcess::spawn(&cfg.trae_cmd, &cfg.trae_args, &cfg.workdir).await?;
     let outcome = async {
         let info = agent.new_session(&cfg.workdir).await?;
-        let outcome = agent.prompt(&info.session_id, prompt, &Policy::ApproveAll).await?;
+        let outcome = agent
+            .prompt(&info.session_id, prompt, &policy, &mut |_| Ok(()))
+            .await?;
         Ok((info, outcome))
     }
     .await;
@@ -162,6 +222,7 @@ pub async fn chat_completions_buffered(
             &completion_id,
             &outcome.text,
             finish_reason(&outcome.stop_reason),
+            outcome.usage.as_ref(),
         ))),
         Err(e) => {
             tracing::error!(error = %e, "turn failed");

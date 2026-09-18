@@ -57,6 +57,21 @@ pub struct Error {
     pub message: String,
 }
 
+/// Token accounting reported by the agent (`session/prompt` response `usage`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Usage {
+    #[serde(rename = "totalTokens", default)]
+    pub total_tokens: u64,
+    #[serde(rename = "inputTokens", default)]
+    pub input_tokens: u64,
+    #[serde(rename = "outputTokens", default)]
+    pub output_tokens: u64,
+    #[serde(rename = "thoughtTokens", default)]
+    pub thought_tokens: u64,
+    #[serde(rename = "cachedReadTokens", default)]
+    pub cached_read_tokens: u64,
+}
+
 /// `session/update` notification payloads we care about.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
@@ -66,7 +81,15 @@ pub enum Update {
         #[serde(default)]
         content: Content,
     },
+    /// Text chunk of the agent's visible reasoning stream.
+    AgentThoughtChunk {
+        #[serde(default)]
+        content: Content,
+    },
     /// Final state of a tool call (arrives alongside others we ignore).
+    /// Includes traecli's mid-turn `usage_update` snapshots — the OpenAI
+    /// surface carries usage only on the final chunk, from the prompt
+    /// response's authoritative numbers.
     #[serde(other)]
     Other,
 }
@@ -85,6 +108,8 @@ pub struct Content {
 pub struct PromptResponse {
     #[serde(rename = "stopReason")]
     pub stop_reason: String,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// Result of driving one full prompt turn.
@@ -93,4 +118,6 @@ pub struct TurnOutcome {
     /// Concatenated agent text chunks.
     pub text: String,
     pub stop_reason: String,
+    /// Token accounting from the prompt response, when the agent reports it.
+    pub usage: Option<Usage>,
 }
