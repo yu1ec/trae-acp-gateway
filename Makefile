@@ -89,7 +89,7 @@ init-rust:
 	@echo "==> Adding rustup targets..."
 	@targets=""; \
 	if [ "$(INIT_TARGETS)" = "all" ]; then \
-		targets="aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin \
+		targets="aarch64-apple-darwin x86_64-apple-darwin \
 		         aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu \
 		         x86_64-pc-windows-msvc"; \
 	else \
@@ -98,7 +98,7 @@ init-rust:
 				case "$(ARCH)" in \
 					arm64)     targets="aarch64-apple-darwin" ;; \
 					x86_64)    targets="x86_64-apple-darwin" ;; \
-					universal) targets="aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin" ;; \
+					universal) targets="aarch64-apple-darwin x86_64-apple-darwin" ;; \
 				esac ;; \
 			linux) \
 				case "$(ARCH)" in \
@@ -135,7 +135,16 @@ build-cli:
 	@triple=$$( $(MAKE) -s print-triple OS=$(OS) ARCH=$(ARCH) ); \
 	native=$$( $(MAKE) -s is-native-triple TRIPLE=$$triple ); \
 	echo "==> Building CLI for $(OS)/$(ARCH) ($$triple)..."; \
-	if [ "$$native" = "1" ]; then \
+	if [ "$(OS)" = "macos" ] && [ "$(ARCH)" = "universal" ]; then \
+		$(CARGO) build --release --target aarch64-apple-darwin; \
+		$(CARGO) build --release --target x86_64-apple-darwin; \
+		mkdir -p $(TARGET_DIR)/universal-apple-darwin/release; \
+		lipo -create \
+			$(TARGET_DIR)/aarch64-apple-darwin/release/trae_acp_gateway \
+			$(TARGET_DIR)/x86_64-apple-darwin/release/trae_acp_gateway \
+			-output $(TARGET_DIR)/universal-apple-darwin/release/trae_acp_gateway; \
+		echo "==> Output: $(TARGET_DIR)/universal-apple-darwin/release/trae_acp_gateway"; \
+	elif [ "$$native" = "1" ]; then \
 		$(CARGO) build --release; \
 		echo "==> Output: $(TARGET_DIR)/release/trae_acp_gateway"; \
 	else \

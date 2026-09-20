@@ -17,7 +17,7 @@ jobs:
         include:
           - platform: macos-latest
             rust_target: universal-apple-darwin
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             tauri_args: '--target universal-apple-darwin --no-sign'
             cli_path: target/universal-apple-darwin/release/trae_acp_gateway
             cli_asset: trae_acp_gateway-macos-universal
@@ -87,7 +87,13 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            cargo build --release --target ${{ matrix.rust_target }}
+            cargo build --release --target aarch64-apple-darwin
+            cargo build --release --target x86_64-apple-darwin
+            mkdir -p target/universal-apple-darwin/release
+            lipo -create \
+              target/aarch64-apple-darwin/release/trae_acp_gateway \
+              target/x86_64-apple-darwin/release/trae_acp_gateway \
+              -output target/universal-apple-darwin/release/trae_acp_gateway
           else
             cargo build --release
           fi

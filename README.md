@@ -199,7 +199,8 @@ make build-frontend   # 输出到 app/ui/
 ### 常用构建选项
 
 ```bash
-# macOS 通用二进制（需同时安装 aarch64 与 x86_64 target）
+# macOS 通用二进制（先安装两个真实 target，universal-apple-darwin 仅用于 Tauri）
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo tauri build --target universal-apple-darwin
 
 # 指定安装包类型（macOS 可选 app、dmg）
