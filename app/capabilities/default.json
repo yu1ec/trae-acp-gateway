@@ -1,5 +1,5 @@
 {
   "identifier": "default",
   "windows": ["*"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

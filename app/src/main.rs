@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -7,6 +8,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager as _, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
+use tauri_plugin_notification::NotificationExt as _;
 use trae_acp_gateway::{
     canonicalize_workdir, default_workdir, ensure_workdir, is_legacy_workdir, serve,
     Config as GatewayConfig,
@@ -101,9 +103,14 @@ impl LogBuffer {
 struct AppState {
     cfg: Mutex<AppConfig>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stop_requested: Mutex<bool>,
     logs: Arc<LogBuffer>,
     tray_status: Mutex<Option<MenuItem<tauri::Wry>>>,
     tray_toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
+}
+
+fn notify_error(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 fn is_running(state: &AppState) -> bool {
@@ -117,6 +124,7 @@ fn is_running(state: &AppState) -> bool {
 }
 
 fn stop(state: &AppState) -> bool {
+    *state.stop_requested.lock().unwrap() = true;
     state
         .handle
         .lock()
@@ -129,15 +137,43 @@ fn stop(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn watch_gateway(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let state = app.state::<AppState>();
+            if *state.stop_requested.lock().unwrap() {
+                break;
+            }
+            let crashed = state
+                .handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|h| h.is_finished())
+                .unwrap_or(false);
+            if crashed {
+                *state.handle.lock().unwrap() = None;
+                update_tray(&app);
+                notify_error(&app, "Gateway 已停止", "服务意外退出，请查看日志");
+                tracing::error!("gateway exited unexpectedly");
+                break;
+            }
+        }
+    });
+}
+
 async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if is_running(state) {
         return Ok(());
     }
+    *state.stop_requested.lock().unwrap() = false;
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
     let handle = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
     *state.handle.lock().unwrap() = Some(handle);
     update_tray(app);
+    watch_gateway(app.clone());
     Ok(())
 }
 
@@ -299,6 +335,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             // Closing a window just hides it; the app lives in the tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -376,6 +413,7 @@ fn main() {
                             };
                             if let Err(e) = result {
                                 tracing::error!("gateway toggle failed: {e}");
+                                notify_error(&app, "Gateway 操作失败", &e);
                             }
                         });
                     }
@@ -389,10 +427,16 @@ fn main() {
             app.manage(AppState {
                 cfg: Mutex::new(cfg),
                 handle: Mutex::new(None),
+                stop_requested: Mutex::new(false),
                 logs: logs.clone(),
                 tray_status: Mutex::new(Some(status)),
                 tray_toggle: Mutex::new(Some(toggle)),
             });
+
+            let _ = app.notification().request_permission();
+
+            #[cfg(target_os = "macos")]
+            let _ = app.set_dock_visibility(false);
 
             // Tray-manager contract: the gateway comes up with the app.
             let app_handle = app.handle().clone();
@@ -400,6 +444,7 @@ fn main() {
                 let state = app_handle.state::<AppState>();
                 if let Err(e) = start(&app_handle, &state).await {
                     tracing::error!("auto-start failed: {e}");
+                    notify_error(&app_handle, "Gateway 启动失败", &e);
                 }
             });
 
