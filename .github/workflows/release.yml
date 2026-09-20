@@ -24,13 +24,13 @@ jobs:
           - platform: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             rust_targets: ''
-            tauri_args: '--no-sign'
+            tauri_args: '--target x86_64-unknown-linux-gnu --no-sign'
             cli_path: target/release/trae_acp_gateway
             cli_asset: trae_acp_gateway-linux-x86_64
           - platform: windows-latest
             rust_target: x86_64-pc-windows-msvc
             rust_targets: ''
-            tauri_args: '--no-sign'
+            tauri_args: '--target x86_64-pc-windows-msvc --no-sign'
             cli_path: target/release/trae_acp_gateway.exe
             cli_asset: trae_acp_gateway-windows-x86_64.exe
 
@@ -137,20 +137,44 @@ jobs:
           else
             triple="x86_64-pc-windows-msvc"
           fi
-          bundle_root="target/${triple}/release/bundle"
+          bundle_root=""
+          for candidate in "target/${triple}/release/bundle" "target/release/bundle"; do
+            if [ -d "$candidate" ]; then
+              bundle_root="$candidate"
+              break
+            fi
+          done
+          if [ -z "$bundle_root" ]; then
+            echo "Bundle directory not found under target/" >&2
+            find target -type d -name bundle 2>/dev/null | sed 's/^/  /' || true
+            exit 1
+          fi
+          echo "Using bundle root: $bundle_root"
           case "${{ matrix.platform }}" in
             macos-latest)
               dmg=$(find "$bundle_root/dmg" -name '*.dmg' -type f | head -1)
+              if [ -z "$dmg" ]; then
+                echo "DMG not found under $bundle_root/dmg" >&2
+                exit 1
+              fi
               cp "$dmg" /tmp/Trae-ACP-Gateway-macos-universal.dmg
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-macos-universal.dmg --clobber
               ;;
             ubuntu-22.04)
               appimage=$(find "$bundle_root/appimage" -name '*.AppImage' -type f | head -1)
+              if [ -z "$appimage" ]; then
+                echo "AppImage not found under $bundle_root/appimage" >&2
+                exit 1
+              fi
               cp "$appimage" /tmp/Trae-ACP-Gateway-linux-x86_64.AppImage
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-linux-x86_64.AppImage --clobber
               ;;
             windows-latest)
               msi=$(find "$bundle_root/msi" -name '*.msi' -type f | head -1)
+              if [ -z "$msi" ]; then
+                echo "MSI not found under $bundle_root/msi" >&2
+                exit 1
+              fi
               cp "$msi" /tmp/Trae-ACP-Gateway-windows-x86_64.msi
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-windows-x86_64.msi --clobber
               ;;
