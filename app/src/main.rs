@@ -7,7 +7,10 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager as _, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
-use trae_acp_gateway::{canonicalize_workdir, serve, Config as GatewayConfig};
+use trae_acp_gateway::{
+    canonicalize_workdir, default_workdir, ensure_workdir, is_legacy_workdir, serve,
+    Config as GatewayConfig,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -25,7 +28,7 @@ impl AppConfig {
     fn defaults() -> Self {
         Self {
             port: 8080,
-            workdir: ".".into(),
+            workdir: default_workdir(),
             trae_cmd: "traecli".into(),
             trae_args: vec!["acp".into(), "serve".into()],
             sandbox: true,
@@ -33,6 +36,22 @@ impl AppConfig {
             autostart: false,
         }
     }
+}
+
+fn normalize_workdir(cfg: &mut AppConfig) {
+    if is_legacy_workdir(&cfg.workdir) {
+        cfg.workdir = default_workdir();
+    }
+    if let Err(e) = ensure_workdir(&cfg.workdir) {
+        tracing::warn!("failed to create workdir `{}`: {e}", cfg.workdir);
+    }
+}
+
+fn persist_config(app: &AppHandle, cfg: &AppConfig) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("config.json"), json).map_err(|e| e.to_string())
 }
 
 fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
@@ -115,13 +134,6 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
         return Ok(());
     }
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
-    // GUI has no shell, so expand `~` ourselves before the ACP agent sees it.
-    if let Some(rest) = gcfg.workdir.strip_prefix("~/") {
-        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-        if let Ok(home) = std::env::var(home_var) {
-            gcfg.workdir = format!("{home}/{rest}");
-        }
-    }
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
     let handle = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
     *state.handle.lock().unwrap() = Some(handle);
@@ -151,10 +163,14 @@ fn open_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) {
         let _ = win.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, label, WebviewUrl::App(format!("{label}.html").into()))
-        .title(title)
-        .inner_size(w, h)
-        .build();
+    let _ = WebviewWindowBuilder::new(
+        app,
+        label,
+        WebviewUrl::App(format!("index.html#/{label}").into()),
+    )
+    .title(title)
+    .inner_size(w, h)
+    .build();
 }
 
 #[tauri::command]
@@ -174,8 +190,9 @@ fn get_config_path(app: AppHandle) -> Result<String, String> {
 async fn save_config(
     app: AppHandle,
     state: State<'_, AppState>,
-    cfg: AppConfig,
+    mut cfg: AppConfig,
 ) -> Result<(), String> {
+    normalize_workdir(&mut cfg);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -301,10 +318,18 @@ fn main() {
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
-            let cfg = std::fs::read_to_string(data_dir.join("config.json"))
+            let mut cfg = std::fs::read_to_string(data_dir.join("config.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(AppConfig::defaults);
+            let before = cfg.workdir.clone();
+            normalize_workdir(&mut cfg);
+            if cfg.workdir != before {
+                let app_handle = app.handle().clone();
+                if let Err(e) = persist_config(&app_handle, &cfg) {
+                    tracing::warn!("failed to migrate config workdir: {e}");
+                }
+            }
 
             let status = MenuItem::with_id(app, "status", "Gateway: Stopped", false, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Start Gateway", true, None::<&str>)?;
@@ -355,7 +380,7 @@ fn main() {
                         });
                     }
                     "settings" => open_window(app, "settings", "Settings", 520.0, 480.0),
-                    "logs" => open_window(app, "logs", "Logs", 720.0, 480.0),
+                    "logs" => open_window(app, "logs", "Logs", 720.0, 560.0),
                     "quit" => app.exit(0),
                     _ => {}
                 })

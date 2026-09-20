@@ -9,7 +9,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use axum::routing::{get, post};
 use axum::Router;
-pub use config::Config;
+pub use config::{
+    default_workdir, ensure_workdir, expand_workdir, is_legacy_workdir, user_home_dir,
+    Config, DEFAULT_WORKDIR_NAME,
+};
 
 pub fn router(cfg: Arc<Config>) -> Router {
     Router::new()
@@ -35,8 +38,11 @@ pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<tokio::task::JoinHandle<(
 
 /// ACP agents reject relative cwd (`session/new`: -32602), so normalize once.
 pub fn canonicalize_workdir(cfg: &mut Config) -> anyhow::Result<()> {
-    cfg.workdir = std::fs::canonicalize(&cfg.workdir)
-        .with_context(|| format!("resolving workdir `{}`", cfg.workdir))?
+    let expanded = expand_workdir(&cfg.workdir);
+    std::fs::create_dir_all(&expanded)
+        .with_context(|| format!("creating workdir `{expanded}`"))?;
+    cfg.workdir = std::fs::canonicalize(&expanded)
+        .with_context(|| format!("resolving workdir `{expanded}`"))?
         .display()
         .to_string();
     Ok(())

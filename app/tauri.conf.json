@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.trae.acp-gateway",
   "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:3847",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "ui"
   },
   "app": {

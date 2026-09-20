@@ -1,2 +1,4 @@
 /target
 /agent-workdir
+/app/frontend/node_modules
+/app/ui/

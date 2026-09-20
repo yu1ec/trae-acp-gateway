@@ -1,0 +1,54 @@
+.settings-page {
+  margin: 16px;
+}
+
+.settings-page .row {
+  margin-bottom: 12px;
+}
+
+.settings-page label {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.settings-page input[type="text"],
+.settings-page input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid gray;
+  border-radius: 6px;
+}
+
+.settings-page input[type="number"] {
+  width: 120px;
+}
+
+.settings-page .inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-page button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(136, 136, 136, 0.53);
+  cursor: pointer;
+}
+
+.settings-page .checks label {
+  display: inline;
+  font-weight: normal;
+}
+
+.settings-page #status {
+  margin-top: 14px;
+  color: gray;
+  min-height: 18px;
+}
+
+.settings-page #save {
+  margin-top: 10px;
+}
