@@ -216,7 +216,15 @@ cargo tauri build --no-sign
 
 ### 发布步骤
 
-1. 同步版本号：更新 `Cargo.toml`、`app/Cargo.toml`、`app/tauri.conf.json` 中的 `version` 字段
+1. 同步版本号（推荐一键命令）：
+
+```bash
+make bump-version VERSION=0.1.2
+make check-version TAG=0.1.2   # 发布前本地校验，与 CI 一致
+```
+
+会更新 `Cargo.toml`、`app/Cargo.toml`、`app/tauri.conf.json`、`app/frontend/package.json`（及 lock 文件）。
+
 2. 提交代码后创建并推送 tag：
 
 ```bash

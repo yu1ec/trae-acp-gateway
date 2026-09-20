@@ -39,7 +39,7 @@ SIGN ?= 0
 # INIT_TARGETS=all adds all common rustup targets during init
 INIT_TARGETS ?= current
 
-.PHONY: help init init-rust init-tauri init-frontend build-cli build-frontend build-app dev-app run-cli clean
+.PHONY: help init init-rust init-tauri init-frontend build-cli build-frontend build-app dev-app run-cli bump-version check-version clean
 
 .DEFAULT_GOAL := help
 
@@ -53,6 +53,8 @@ help:
 	@echo "  build-app   Build desktop app ($(APP_NAME)) installers"
 	@echo "  dev-app     Run Tauri dev server (hot reload)"
 	@echo "  run-cli     Build (if needed) and run CLI gateway"
+	@echo "  bump-version  Sync version across Cargo/Tauri/frontend files"
+	@echo "  check-version Validate version matches tag (CI check)"
 	@echo "  clean       Remove build artifacts (cargo clean)"
 	@echo ""
 	@echo "Variables:"
@@ -61,6 +63,8 @@ help:
 	@echo "  BUNDLES     Installer types (default per OS)"
 	@echo "  SIGN        1=enable signing, 0=--no-sign  (default: 0)"
 	@echo "  INIT_TARGETS  current | all  (default: current)"
+	@echo "  VERSION     Target version for bump-version (e.g. 0.1.2)"
+	@echo "  TAG         Tag version for check-version (default: current git tag)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make init"
@@ -71,6 +75,8 @@ help:
 	@echo "  make build-app OS=windows ARCH=x86_64 BUNDLES=msi"
 	@echo "  make dev-app"
 	@echo "  make run-cli"
+	@echo "  make bump-version VERSION=0.1.2"
+	@echo "  make check-version TAG=0.1.2"
 	@echo ""
 	@echo "Note: Tauri app builds must run on the target OS (macOS universal is an exception)."
 
@@ -179,6 +185,13 @@ dev-app:
 
 run-cli:
 	@./run.sh
+
+bump-version:
+	@test -n "$(VERSION)" || (echo "Usage: make bump-version VERSION=0.1.2" >&2; exit 1)
+	@./scripts/bump-version.sh "$(VERSION)"
+
+check-version:
+	@./scripts/check-version.sh "$(TAG)"
 
 clean:
 	$(CARGO) clean

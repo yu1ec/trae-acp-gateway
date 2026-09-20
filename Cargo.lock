@@ -4766,7 +4766,7 @@ dependencies = [
 
 [[package]]
 name = "trae-acp-gateway-app"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -4785,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "trae_acp_gateway"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
