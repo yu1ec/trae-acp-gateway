@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin
+            tauri_args: '--target universal-apple-darwin --no-sign'
+            cli_path: target/universal-apple-darwin/release/trae_acp_gateway
+            cli_asset: trae_acp_gateway-macos-universal
+          - platform: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            rust_targets: ''
+            tauri_args: '--no-sign'
+            cli_path: target/release/trae_acp_gateway
+            cli_asset: trae_acp_gateway-linux-x86_64
+          - platform: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            rust_targets: ''
+            tauri_args: '--no-sign'
+            cli_path: target/release/trae_acp_gateway.exe
+            cli_asset: trae_acp_gateway-windows-x86_64.exe
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './app -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/frontend
+
+      - name: Validate version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          TAURI_VERSION=$(jq -r .version app/tauri.conf.json)
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ] || [ "$TAG_VERSION" != "$TAURI_VERSION" ]; then
+            echo "Version mismatch:"
+            echo "  tag:   $TAG_VERSION"
+            echo "  cargo: $CARGO_VERSION"
+            echo "  tauri: $TAURI_VERSION"
+            exit 1
+          fi
+          echo "Version OK: $TAG_VERSION"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Build CLI
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            cargo build --release --target ${{ matrix.rust_target }}
+          else
+            cargo build --release
+          fi
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: Trae ACP Gateway ${{ github.ref_name }}
+          releaseBody: |
+            ## CLI
+            - `trae_acp_gateway-macos-universal` — macOS
+            - `trae_acp_gateway-linux-x86_64` — Linux
+            - `trae_acp_gateway-windows-x86_64.exe` — Windows
+
+            ## App
+            - macOS: `.app` + DMG (Universal)
+            - Linux: DEB + AppImage
+            - Windows: MSI + NSIS
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.tauri_args }}
+
+      - name: Upload CLI binary
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "${{ matrix.cli_path }}#${{ matrix.cli_asset }}" \
+            --clobber

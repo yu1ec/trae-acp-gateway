@@ -165,6 +165,32 @@ cargo tauri build --bundles dmg
 cargo tauri build --no-sign
 ```
 
+## 发布到 GitHub Releases
+
+推送 `v*` 格式的 tag 时，GitHub Actions 会自动在三端构建 CLI 与 App 安装包并发布到 Releases。
+
+### 发布步骤
+
+1. 同步版本号：更新 `Cargo.toml`、`app/Cargo.toml`、`app/tauri.conf.json` 中的 `version` 字段
+2. 提交代码后创建并推送 tag：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+3. 在 GitHub **Actions** 页查看构建进度，完成后在 **Releases** 页下载产物
+
+### 发布产物
+
+| 平台 | CLI | App |
+|------|-----|-----|
+| macOS | `trae_acp_gateway-macos-universal` | `.app` + DMG（Universal） |
+| Linux | `trae_acp_gateway-linux-x86_64` | DEB + AppImage |
+| Windows | `trae_acp_gateway-windows-x86_64.exe` | MSI + NSIS |
+
+> 仓库需在 **Settings → Actions → General → Workflow permissions** 中启用 **Read and write permissions**，否则无法创建 Release。
+
 ## 项目结构
 
 ```
@@ -175,6 +201,7 @@ cargo tauri build --no-sign
 │   ├── frontend/     # React 源码（Vite）
 │   ├── ui/           # 前端构建产物（gitignore）
 │   └── tauri.conf.json
+├── .github/workflows/  # CI / Release 工作流
 ├── run.sh            # CLI 快速启动脚本
 ├── Makefile          # 统一构建入口
 └── Cargo.toml        # Workspace 配置
