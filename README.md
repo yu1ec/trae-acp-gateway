@@ -216,20 +216,40 @@ cargo tauri build --no-sign
 
 ### 发布步骤
 
-1. 同步版本号（推荐一键命令）：
+1. 按变更类型自动递增版本号（推荐）：
+
+```bash
+# 修复 bug:   0.1.2 -> 0.1.3
+make release TYPE=patch
+
+# 新功能:     0.1.2 -> 0.2.0
+make release TYPE=minor
+
+# 破坏性变更: 0.1.2 -> 1.0.0
+make release TYPE=major
+
+# 仅预览，不改文件
+make release TYPE=patch DRY_RUN=1
+```
+
+也支持别名：`fix` / `bug` / `feature` / `feat` / `breaking`，以及中文 `修复` / `功能` / `大版本`。
+
+命令会更新所有版本文件，并输出你需要手动执行的 `git commit` / `git tag` / `git push` 命令。
+
+如需指定确切版本，仍可使用：
 
 ```bash
 make bump-version VERSION=0.1.2
 make check-version TAG=0.1.2   # 发布前本地校验，与 CI 一致
 ```
 
-会更新 `Cargo.toml`、`app/Cargo.toml`、`app/tauri.conf.json`、`app/frontend/package.json`（及 lock 文件）。
-
-2. 提交代码后创建并推送 tag：
+2. 按脚本输出的命令提交并推送 tag（示例）：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git add -A
+git commit -m "chore: release v0.1.3"
+git tag v0.1.3
+git push origin HEAD --tags
 ```
 
 3. 在 GitHub **Actions** 页查看构建进度，完成后在 **Releases** 页下载产物

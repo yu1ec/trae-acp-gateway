@@ -39,7 +39,7 @@ SIGN ?= 0
 # INIT_TARGETS=all adds all common rustup targets during init
 INIT_TARGETS ?= current
 
-.PHONY: help init init-rust init-tauri init-frontend build-cli build-frontend build-app dev-app run-cli bump-version check-version clean
+.PHONY: help init init-rust init-tauri init-frontend build-cli build-frontend build-app dev-app run-cli release bump-version check-version clean
 
 .DEFAULT_GOAL := help
 
@@ -53,7 +53,8 @@ help:
 	@echo "  build-app   Build desktop app ($(APP_NAME)) installers"
 	@echo "  dev-app     Run Tauri dev server (hot reload)"
 	@echo "  run-cli     Build (if needed) and run CLI gateway"
-	@echo "  bump-version  Sync version across Cargo/Tauri/frontend files"
+	@echo "  release       Auto bump version by type and print git tag commands"
+	@echo "  bump-version  Sync version to an explicit version"
 	@echo "  check-version Validate version matches tag (CI check)"
 	@echo "  clean       Remove build artifacts (cargo clean)"
 	@echo ""
@@ -63,6 +64,8 @@ help:
 	@echo "  BUNDLES     Installer types (default per OS)"
 	@echo "  SIGN        1=enable signing, 0=--no-sign  (default: 0)"
 	@echo "  INIT_TARGETS  current | all  (default: current)"
+	@echo "  TYPE        Release bump type: patch | minor | major (for release)"
+	@echo "  DRY_RUN     1=preview release without changing files"
 	@echo "  VERSION     Target version for bump-version (e.g. 0.1.2)"
 	@echo "  TAG         Tag version for check-version (default: current git tag)"
 	@echo ""
@@ -75,6 +78,8 @@ help:
 	@echo "  make build-app OS=windows ARCH=x86_64 BUNDLES=msi"
 	@echo "  make dev-app"
 	@echo "  make run-cli"
+	@echo "  make release TYPE=patch"
+	@echo "  make release TYPE=minor DRY_RUN=1"
 	@echo "  make bump-version VERSION=0.1.2"
 	@echo "  make check-version TAG=0.1.2"
 	@echo ""
@@ -185,6 +190,14 @@ dev-app:
 
 run-cli:
 	@./run.sh
+
+release:
+	@test -n "$(TYPE)" || (echo "Usage: make release TYPE=patch|minor|major" >&2; exit 1)
+	@if [ "$(DRY_RUN)" = "1" ]; then \
+		./scripts/release.sh "$(TYPE)" --dry-run; \
+	else \
+		./scripts/release.sh "$(TYPE)"; \
+	fi
 
 bump-version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump-version VERSION=0.1.2" >&2; exit 1)
