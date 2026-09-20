@@ -11,8 +11,10 @@ use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_notification::NotificationExt as _;
 use trae_acp_gateway::{
     canonicalize_workdir, default_workdir, ensure_workdir, is_legacy_workdir, serve,
-    Config as GatewayConfig,
+    Config as GatewayConfig, CURRENT_VERSION,
 };
+
+mod update;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -24,6 +26,7 @@ struct AppConfig {
     sandbox: bool,
     debug: bool,
     autostart: bool,
+    auto_check_update: bool,
 }
 
 impl AppConfig {
@@ -36,6 +39,7 @@ impl AppConfig {
             sandbox: true,
             debug: false,
             autostart: false,
+            auto_check_update: false,
         }
     }
 }
@@ -64,6 +68,8 @@ fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
         trae_args: cfg.trae_args.clone(),
         sandbox: cfg.sandbox,
         debug: cfg.debug,
+        auto_check_update: false,
+        no_auto_check_update: false,
     }
 }
 
@@ -111,6 +117,15 @@ struct AppState {
 
 fn notify_error(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+fn notify_update_available(app: &AppHandle, latest: &str) {
+    let _ = app
+        .notification()
+        .builder()
+        .title("发现新版本")
+        .body(format!("v{latest} 可用，请在设置中下载安装"))
+        .show();
 }
 
 fn is_running(state: &AppState) -> bool {
@@ -292,6 +307,58 @@ async fn pick_workdir(app: AppHandle) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+struct UpdateCheckResponse {
+    current_version: String,
+    latest_version: Option<String>,
+    update_available: bool,
+    release_url: String,
+    installer_name: Option<String>,
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    CURRENT_VERSION.to_string()
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResponse, String> {
+    let info = update::check_app_update().await.map_err(|e| e.to_string())?;
+    if info.update_available {
+        if let Some(latest) = &info.latest_version {
+            notify_update_available(&app, latest);
+        }
+    }
+    Ok(UpdateCheckResponse {
+        current_version: info.current_version,
+        latest_version: info.latest_version,
+        update_available: info.update_available,
+        release_url: info.release_url,
+        installer_name: info.asset_name,
+    })
+}
+
+#[tauri::command]
+async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
+    let info = update::check_app_update().await.map_err(|e| e.to_string())?;
+    let latest = info
+        .latest_version
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
+    let confirmed = app
+        .dialog()
+        .message(format!(
+            "将下载 v{latest} 并启动安装程序，是否继续？"
+        ))
+        .title("确认更新")
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
+        .blocking_show();
+    if !confirmed {
+        return Err("update cancelled".into());
+    }
+    update::download_and_install().await.map_err(|e| e.to_string())
+}
+
 struct LogWriter(Arc<LogBuffer>);
 
 impl Clone for LogWriter {
@@ -336,6 +403,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .on_window_event(|window, event| {
             // Closing a window just hides it; the app lives in the tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -351,7 +419,10 @@ fn main() {
             stop_gateway,
             get_status,
             get_logs,
-            pick_workdir
+            pick_workdir,
+            get_app_version,
+            check_for_update,
+            download_and_install_update,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
@@ -425,7 +496,7 @@ fn main() {
                 .build(app)?;
 
             app.manage(AppState {
-                cfg: Mutex::new(cfg),
+                cfg: Mutex::new(cfg.clone()),
                 handle: Mutex::new(None),
                 stop_requested: Mutex::new(false),
                 logs: logs.clone(),
@@ -447,6 +518,20 @@ fn main() {
                     notify_error(&app_handle, "Gateway 启动失败", &e);
                 }
             });
+
+            let auto_check = cfg.auto_check_update;
+            if auto_check {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(info) = update::check_app_update().await {
+                        if info.update_available {
+                            if let Some(latest) = info.latest_version {
+                                notify_update_available(&app_handle, &latest);
+                            }
+                        }
+                    }
+                });
+            }
 
             Ok(())
         })

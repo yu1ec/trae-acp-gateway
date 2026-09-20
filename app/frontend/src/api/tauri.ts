@@ -6,6 +6,15 @@ export interface AppConfig {
   sandbox: boolean;
   debug: boolean;
   autostart: boolean;
+  auto_check_update: boolean;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string;
+  installer_name: string | null;
 }
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -30,4 +39,16 @@ export function pickWorkdir(): Promise<string | null> {
 
 export function getLogs(): Promise<string[]> {
   return invoke<string[]>("get_logs");
+}
+
+export function getAppVersion(): Promise<string> {
+  return invoke<string>("get_app_version");
+}
+
+export function checkForUpdate(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("check_for_update");
+}
+
+export function downloadAndInstallUpdate(): Promise<void> {
+  return invoke<void>("download_and_install_update");
 }

@@ -1,5 +1,10 @@
 {
   "identifier": "default",
   "windows": ["*"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "dialog:default",
+    "opener:default"
+  ]
 }

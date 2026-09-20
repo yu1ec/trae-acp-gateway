@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { getConfig, pickWorkdir, saveConfig, type AppConfig } from "../api/tauri";
+import {
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  getAppVersion,
+  getConfig,
+  pickWorkdir,
+  saveConfig,
+  type AppConfig,
+} from "../api/tauri";
 import "../styles/settings.css";
 
 export default function SettingsPage() {
@@ -10,6 +18,12 @@ export default function SettingsPage() {
   const [sandbox, setSandbox] = useState(true);
   const [debug, setDebug] = useState(false);
   const [autostart, setAutostart] = useState(false);
+  const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
@@ -22,8 +36,13 @@ export default function SettingsPage() {
         setSandbox(cfg.sandbox);
         setDebug(cfg.debug);
         setAutostart(cfg.autostart);
+        setAutoCheckUpdate(cfg.auto_check_update);
       })
       .catch((e: unknown) => setStatus(`Error: ${e}`));
+
+    getAppVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => setAppVersion("unknown"));
   }, []);
 
   const handlePick = async () => {
@@ -44,11 +63,42 @@ export default function SettingsPage() {
         sandbox,
         debug,
         autostart,
+        auto_check_update: autoCheckUpdate,
       };
       await saveConfig(cfg);
       setStatus("Saved. Gateway restarted if it was running.");
     } catch (e: unknown) {
       setStatus(`Error: ${e}`);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const info = await checkForUpdate();
+      setUpdateAvailable(info.update_available);
+      setLatestVersion(info.latest_version);
+      if (info.update_available && info.latest_version) {
+        setStatus(`Update available: v${info.latest_version}`);
+      } else {
+        setStatus("Already up to date.");
+      }
+    } catch (e: unknown) {
+      setStatus(`Update check failed: ${e}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setInstallingUpdate(true);
+    try {
+      await downloadAndInstallUpdate();
+      setStatus("Installer launched. Follow the on-screen steps to finish.");
+    } catch (e: unknown) {
+      setStatus(`Install failed: ${e}`);
+    } finally {
+      setInstallingUpdate(false);
     }
   };
 
@@ -127,6 +177,41 @@ export default function SettingsPage() {
           Launch at login
         </label>
       </div>
+
+      <h2 className="section-title">Updates</h2>
+      <div className="row">
+        <label>Current version</label>
+        <span>v{appVersion || "…"}</span>
+      </div>
+      <div className="row checks">
+        <label>
+          <input
+            type="checkbox"
+            checked={autoCheckUpdate}
+            onChange={(e) => setAutoCheckUpdate(e.target.checked)}
+          />{" "}
+          Check for updates on startup
+        </label>
+      </div>
+      <div className="row inline update-actions">
+        <button
+          type="button"
+          disabled={checkingUpdate}
+          onClick={() => void handleCheckUpdate()}
+        >
+          {checkingUpdate ? "Checking…" : "Check now"}
+        </button>
+        {updateAvailable && (
+          <button
+            type="button"
+            disabled={installingUpdate}
+            onClick={() => void handleInstallUpdate()}
+          >
+            {installingUpdate ? "Downloading…" : `Install v${latestVersion ?? ""}`}
+          </button>
+        )}
+      </div>
+
       <button id="save" type="button" onClick={() => void handleSave()}>
         Save
       </button>

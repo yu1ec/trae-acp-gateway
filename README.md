@@ -88,6 +88,40 @@ target/release/trae_acp_gateway
 | `--trae-args` | `acp,serve` | 传给 Agent 的参数（逗号分隔） |
 | `--sandbox` | `true` | 是否保持 Agent 沙箱限制 |
 | `--debug` | — | 打印与 Agent 的 JSON-RPC 原始日志 |
+| `--auto-check-update` | — | 启动 gateway 时在后台检查 GitHub Releases 更新 |
+| `--no-auto-check-update` | — | 禁用自动检查（覆盖 settings 文件） |
+
+### 检查与自更新
+
+CLI 可从 GitHub Releases 检查并替换自身二进制：
+
+```bash
+# 检查是否有新版本（有更新时 exit code 为 1，便于脚本检测）
+./target/release/trae_acp_gateway update check
+
+# 下载并替换当前二进制
+./target/release/trae_acp_gateway update apply
+./target/release/trae_acp_gateway update apply --yes
+```
+
+持久化设置（是否启动时自动检查）保存在：
+
+| 平台 | 路径 |
+|------|------|
+| macOS / Linux | `~/.config/trae-acp-gateway/settings.json` |
+| Windows | `%APPDATA%\trae-acp-gateway\settings.json` |
+
+示例：
+
+```json
+{
+  "auto_check_update": false
+}
+```
+
+启动 gateway 时若启用自动检查，会发送系统通知（macOS / Linux / Windows）并在终端提示；不会自动下载。
+
+更新源：[yu1ec/trae-acp-gateway](https://github.com/yu1ec/trae-acp-gateway) GitHub Releases。
 
 ## 打包 App
 
@@ -146,6 +180,16 @@ cargo tauri dev
 
 `cargo tauri dev` 会自动运行 `npm run dev`（Vite @ localhost:3847）并热重载 Rust 侧。
 
+### 自动更新
+
+App 设置页提供：
+
+- **Check for updates on startup**：启动时在后台检查 GitHub Releases，发现新版本会发送系统通知
+- **Check now**：手动检查，发现新版本时同样发送系统通知
+- **Install vX.Y.Z**：下载对应平台安装包并启动安装程序（macOS DMG / Linux AppImage / Windows MSI）
+
+App 配置保存在 `{app_data_dir}/config.json`，字段 `auto_check_update`（默认 `false`）。
+
 ### 单独构建前端
 
 ```bash
@@ -183,13 +227,15 @@ git push origin v0.1.0
 
 ### 发布产物
 
-| 平台 | CLI | App |
-|------|-----|-----|
-| macOS | `trae_acp_gateway-macos-universal` | `.app` + DMG（Universal） |
-| Linux | `trae_acp_gateway-linux-x86_64` | DEB + AppImage |
-| Windows | `trae_acp_gateway-windows-x86_64.exe` | MSI + NSIS |
+| 平台 | CLI | App（Tauri 默认 bundle） | App（稳定名，供自动更新） |
+|------|-----|--------------------------|---------------------------|
+| macOS | `trae_acp_gateway-macos-universal` | `.app` + DMG（Universal） | `Trae-ACP-Gateway-macos-universal.dmg` |
+| Linux | `trae_acp_gateway-linux-x86_64` | DEB + AppImage | `Trae-ACP-Gateway-linux-x86_64.AppImage` |
+| Windows | `trae_acp_gateway-windows-x86_64.exe` | MSI + NSIS | `Trae-ACP-Gateway-windows-x86_64.msi` |
 
 > 仓库需在 **Settings → Actions → General → Workflow permissions** 中启用 **Read and write permissions**，否则无法创建 Release。
+>
+> GitHub API 未认证时限流 60 次/小时；可设置环境变量 `GITHUB_TOKEN` 提高限额。
 
 ## 项目结构
 

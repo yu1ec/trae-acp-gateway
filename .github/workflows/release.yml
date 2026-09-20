@@ -105,13 +105,50 @@ jobs:
             - `trae_acp_gateway-linux-x86_64` — Linux
             - `trae_acp_gateway-windows-x86_64.exe` — Windows
 
-            ## App
+            ## App (stable names for auto-update)
+            - `Trae-ACP-Gateway-macos-universal.dmg` — macOS
+            - `Trae-ACP-Gateway-linux-x86_64.AppImage` — Linux
+            - `Trae-ACP-Gateway-windows-x86_64.msi` — Windows
+
+            ## App (bundles from Tauri)
             - macOS: `.app` + DMG (Universal)
             - Linux: DEB + AppImage
             - Windows: MSI + NSIS
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.tauri_args }}
+
+      - name: Upload App installer (stable names)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            triple="universal-apple-darwin"
+          elif [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
+            triple="x86_64-unknown-linux-gnu"
+          else
+            triple="x86_64-pc-windows-msvc"
+          fi
+          bundle_root="target/${triple}/release/bundle"
+          case "${{ matrix.platform }}" in
+            macos-latest)
+              dmg=$(find "$bundle_root/dmg" -name '*.dmg' -type f | head -1)
+              cp "$dmg" /tmp/Trae-ACP-Gateway-macos-universal.dmg
+              gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-macos-universal.dmg --clobber
+              ;;
+            ubuntu-22.04)
+              appimage=$(find "$bundle_root/appimage" -name '*.AppImage' -type f | head -1)
+              cp "$appimage" /tmp/Trae-ACP-Gateway-linux-x86_64.AppImage
+              gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-linux-x86_64.AppImage --clobber
+              ;;
+            windows-latest)
+              msi=$(find "$bundle_root/msi" -name '*.msi' -type f | head -1)
+              cp "$msi" /tmp/Trae-ACP-Gateway-windows-x86_64.msi
+              gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-windows-x86_64.msi --clobber
+              ;;
+          esac
 
       - name: Upload CLI binary
         shell: bash

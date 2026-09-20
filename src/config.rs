@@ -58,7 +58,41 @@ pub fn expand_workdir(workdir: &str) -> String {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "trae_acp_gateway", about = "OpenAI-compatible gateway over an ACP agent (trae CLI)")]
+#[command(
+    name = "trae_acp_gateway",
+    about = "OpenAI-compatible gateway over an ACP agent (trae CLI)",
+    args_conflicts_with_subcommands = true
+)]
+pub struct Cli {
+    #[command(flatten)]
+    pub config: Config,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Commands {
+    /// Check for and apply updates from GitHub Releases
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum UpdateAction {
+    /// Check whether a newer release is available
+    Check,
+    /// Download and replace the current CLI binary
+    Apply {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, clap::Args)]
 pub struct Config {
     /// TCP port to listen on (localhost only).
     #[arg(long, default_value_t = 8080)]
@@ -84,4 +118,43 @@ pub struct Config {
     /// Log every raw JSON-RPC line exchanged with the agent.
     #[arg(long)]
     pub debug: bool,
+
+    /// Check for updates in the background when starting the gateway.
+    #[arg(long)]
+    pub auto_check_update: bool,
+
+    /// Disable automatic update checks (overrides settings file).
+    #[arg(long, conflicts_with = "auto_check_update")]
+    pub no_auto_check_update: bool,
+}
+
+impl Config {
+    pub fn should_auto_check_update(&self) -> bool {
+        if self.auto_check_update {
+            return true;
+        }
+        if self.no_auto_check_update {
+            return false;
+        }
+        crate::update::CliSettings::load().auto_check_update
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn cli_exposes_update_subcommand() {
+        let cmd = Cli::command();
+        assert!(cmd.find_subcommand("update").is_some());
+    }
+
+    #[test]
+    fn cli_parses_update_check() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["trae_acp_gateway", "update", "check"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Update { .. })));
+    }
 }

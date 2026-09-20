@@ -3,6 +3,7 @@ pub mod agent;
 pub mod config;
 pub mod http;
 pub mod openai;
+pub mod update;
 
 use std::sync::Arc;
 
@@ -10,8 +11,13 @@ use anyhow::Context as _;
 use axum::routing::{get, post};
 use axum::Router;
 pub use config::{
-    default_workdir, ensure_workdir, expand_workdir, is_legacy_workdir, user_home_dir,
-    Config, DEFAULT_WORKDIR_NAME,
+    default_workdir, ensure_workdir, expand_workdir, is_legacy_workdir, user_home_dir, Cli,
+    Commands, Config, UpdateAction, DEFAULT_WORKDIR_NAME,
+};
+pub use update::{
+    app_installer_asset_name, check_for_update, cli_asset_name, download_to_temp,
+    apply_cli_update, notify_update_available, CliSettings, UpdateCheckResult, CURRENT_VERSION,
+    GITHUB_OWNER, GITHUB_REPO, GITHUB_REPO_URL,
 };
 
 pub fn router(cfg: Arc<Config>) -> Router {

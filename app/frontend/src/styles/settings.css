@@ -52,3 +52,12 @@
 .settings-page #save {
   margin-top: 10px;
 }
+
+.settings-page .section-title {
+  margin: 20px 0 10px;
+  font-size: 1rem;
+}
+
+.settings-page .update-actions {
+  margin-bottom: 8px;
+}
