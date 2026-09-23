@@ -51,6 +51,11 @@ pub fn canonicalize_workdir(cfg: &mut Config) -> anyhow::Result<()> {
         .with_context(|| format!("resolving workdir `{expanded}`"))?
         .display()
         .to_string();
+    let resolved = config::resolve_trae_cmd(&cfg.trae_cmd);
+    if resolved != cfg.trae_cmd {
+        tracing::info!(from = %cfg.trae_cmd, to = %resolved, "resolved agent command");
+    }
+    cfg.trae_cmd = resolved;
     Ok(())
 }
 

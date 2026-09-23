@@ -147,8 +147,8 @@ build-cli:
 	native=$$( $(MAKE) -s is-native-triple TRIPLE=$$triple ); \
 	echo "==> Building CLI for $(OS)/$(ARCH) ($$triple)..."; \
 	if [ "$(OS)" = "macos" ] && [ "$(ARCH)" = "universal" ]; then \
-		$(CARGO) build --release --target aarch64-apple-darwin; \
-		$(CARGO) build --release --target x86_64-apple-darwin; \
+		$(CARGO) build --release --target aarch64-apple-darwin --bin trae_acp_gateway; \
+		$(CARGO) build --release --target x86_64-apple-darwin --bin trae_acp_gateway; \
 		mkdir -p $(TARGET_DIR)/universal-apple-darwin/release; \
 		lipo -create \
 			$(TARGET_DIR)/aarch64-apple-darwin/release/trae_acp_gateway \
@@ -156,10 +156,10 @@ build-cli:
 			-output $(TARGET_DIR)/universal-apple-darwin/release/trae_acp_gateway; \
 		echo "==> Output: $(TARGET_DIR)/universal-apple-darwin/release/trae_acp_gateway"; \
 	elif [ "$$native" = "1" ]; then \
-		$(CARGO) build --release; \
+		$(CARGO) build --release --bin trae_acp_gateway; \
 		echo "==> Output: $(TARGET_DIR)/release/trae_acp_gateway"; \
 	else \
-		$(CARGO) build --release --target $$triple; \
+		$(CARGO) build --release --target $$triple --bin trae_acp_gateway; \
 		echo "==> Output: $(TARGET_DIR)/$$triple/release/trae_acp_gateway"; \
 	fi
 

@@ -156,16 +156,26 @@ pub struct AgentProcess {
 impl AgentProcess {
     /// Spawn the agent and run the `initialize` handshake.
     pub async fn spawn(cmd: &str, args: &[String], cwd: &str) -> anyhow::Result<Self> {
-        let mut child = Command::new(cmd)
+        let mut command = Command::new(cmd);
+        command
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Agent's own logs go to our stderr, never onto the RPC channel.
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if let Some(path) = crate::config::agent_path_env() {
+            command.env("PATH", path);
+        }
+        let mut child = command
             .spawn()
-            .with_context(|| format!("spawning agent `{cmd} {}`", args.join(" ")))?;
+            .with_context(|| {
+                format!(
+                    "spawning agent `{cmd} {}` (install traecli or set --trae-cmd to its full path)",
+                    args.join(" ")
+                )
+            })?;
 
         let stdout = child.stdout.take().context("agent stdout not captured")?;
         let stdin = child.stdin.take().context("agent stdin not captured")?;

@@ -32,7 +32,7 @@ struct AppConfig {
 impl AppConfig {
     fn defaults() -> Self {
         Self {
-            port: 8080,
+            port: 60111,
             workdir: default_workdir(),
             trae_cmd: "traecli".into(),
             trae_args: vec!["acp".into(), "serve".into()],

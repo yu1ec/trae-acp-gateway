@@ -11,7 +11,7 @@ import {
 import "../styles/settings.css";
 
 export default function SettingsPage() {
-  const [port, setPort] = useState(8080);
+  const [port, setPort] = useState(60111);
   const [workdir, setWorkdir] = useState("");
   const [traeCmd, setTraeCmd] = useState("traecli");
   const [traeArgs, setTraeArgs] = useState("acp, serve");
@@ -53,7 +53,7 @@ export default function SettingsPage() {
   const handleSave = async () => {
     try {
       const cfg: AppConfig = {
-        port: parseInt(String(port), 10) || 8080,
+        port: parseInt(String(port), 10) || 60111,
         workdir: workdir.trim(),
         trae_cmd: traeCmd.trim() || "traecli",
         trae_args: traeArgs

@@ -39,6 +39,60 @@ pub fn ensure_workdir(workdir: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(expand_workdir(workdir))
 }
 
+/// Common install locations for CLI tools when the process inherits a
+/// minimal PATH (e.g. Tauri / LaunchAgent on macOS omits `~/.local/bin`).
+fn common_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = user_home_dir() {
+        dirs.push(PathBuf::from(&home).join(".local").join("bin"));
+        dirs.push(PathBuf::from(&home).join(".cargo").join("bin"));
+    }
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join("Programs").join("trae").join("bin"));
+    }
+    dirs
+}
+
+/// Resolve a bare agent command name to an executable path.
+pub fn resolve_trae_cmd(cmd: &str) -> String {
+    if cmd.contains('/') || cmd.contains('\\') {
+        return cmd.to_string();
+    }
+
+    #[cfg(windows)]
+    let file_name = if cmd.ends_with(".exe") {
+        cmd.to_string()
+    } else {
+        format!("{cmd}.exe")
+    };
+    #[cfg(not(windows))]
+    let file_name = cmd.to_string();
+
+    for dir in common_bin_dirs() {
+        let path = dir.join(&file_name);
+        if path.is_file() {
+            return path.display().to_string();
+        }
+    }
+    cmd.to_string()
+}
+
+/// PATH value to hand to spawned agent processes so `traecli` and its
+/// helpers remain discoverable under a stripped parent environment.
+pub fn agent_path_env() -> Option<String> {
+    let extra = common_bin_dirs()
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(if cfg!(windows) { ";" } else { ":" });
+    match std::env::var("PATH") {
+        Ok(path) if !path.is_empty() => Some(format!("{extra}{}{path}", if cfg!(windows) { ";" } else { ":" })),
+        _ => Some(extra),
+    }
+}
+
 /// Expand `~` / `~/…` before canonicalization (GUI and CLI share this).
 pub fn expand_workdir(workdir: &str) -> String {
     if workdir == "~" {
@@ -95,7 +149,7 @@ pub enum UpdateAction {
 #[derive(Debug, clap::Args)]
 pub struct Config {
     /// TCP port to listen on (localhost only).
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 60111)]
     pub port: u16,
 
     /// Working directory handed to the agent (sessions and tools operate here).
@@ -156,5 +210,20 @@ mod cli_tests {
         use clap::Parser as _;
         let cli = Cli::try_parse_from(["trae_acp_gateway", "update", "check"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Update { .. })));
+    }
+
+    #[test]
+    fn resolve_trae_cmd_keeps_explicit_paths() {
+        assert_eq!(resolve_trae_cmd("/opt/bin/traecli"), "/opt/bin/traecli");
+        assert_eq!(resolve_trae_cmd(r"C:\Tools\traecli.exe"), r"C:\Tools\traecli.exe");
+    }
+
+    #[test]
+    fn resolve_trae_cmd_finds_local_install() {
+        let home = user_home_dir().expect("HOME");
+        let candidate = PathBuf::from(&home).join(".local").join("bin").join("traecli");
+        if candidate.is_file() {
+            assert_eq!(resolve_trae_cmd("traecli"), candidate.display().to_string());
+        }
     }
 }
