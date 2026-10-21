@@ -13,11 +13,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::AppState;
 use crate::acp::Usage;
 use crate::agent::TurnEvent;
 use crate::http;
 use crate::prompt::{PromptBlock, text_from_content};
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct MessagesRequest {
@@ -140,7 +140,10 @@ pub async fn messages(
     if req.messages.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(error_response("messages must not be empty", "invalid_request_error")),
+            Json(error_response(
+                "messages must not be empty",
+                "invalid_request_error",
+            )),
         ));
     }
     let _ = req.max_tokens;
@@ -148,7 +151,10 @@ pub async fn messages(
     if blocks.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(error_response("no usable message content", "invalid_request_error")),
+            Json(error_response(
+                "no usable message content",
+                "invalid_request_error",
+            )),
         ));
     }
     if req.stream {
@@ -213,84 +219,95 @@ async fn messages_stream(
 
     tokio::spawn(async move {
         let send = |ev: Event| tx.try_send(Ok(ev));
-        let _ = send(Event::default().event("message_start").data(
-            json!({
-                "type": "message_start",
-                "message": {
-                    "id": id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": { "input_tokens": 0, "output_tokens": 0 },
-                }
-            })
-            .to_string(),
-        ));
+        let _ = send(
+            Event::default().event("message_start").data(
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    }
+                })
+                .to_string(),
+            ),
+        );
 
         let mut block_index: u32 = 0;
         let mut thought_buf = String::new();
         let mut text_buf = String::new();
 
         if thinking {
-            let _ = send(Event::default().event("content_block_start").data(
-                json!({
-                    "type": "content_block_start",
-                    "index": block_index,
-                    "content_block": { "type": "thinking", "thinking": "" }
-                })
-                .to_string(),
-            ));
+            let _ = send(
+                Event::default().event("content_block_start").data(
+                    json!({
+                        "type": "content_block_start",
+                        "index": block_index,
+                        "content_block": { "type": "thinking", "thinking": "" }
+                    })
+                    .to_string(),
+                ),
+            );
         }
 
-        let result = http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
-            match ev {
-                TurnEvent::Thought(t) if thinking => {
-                    thought_buf.push_str(t);
-                    let _ = send(Event::default().event("content_block_delta").data(
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": { "type": "thinking_delta", "thinking": t }
-                        })
-                        .to_string(),
-                    ));
-                }
-                TurnEvent::Thought(_) => {}
-                TurnEvent::Message(t) => {
-                    if text_buf.is_empty() {
-                        if thinking {
-                            let _ = send(Event::default().event("content_block_stop").data(
+        let result =
+            http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+                match ev {
+                    TurnEvent::Thought(t) if thinking => {
+                        thought_buf.push_str(t);
+                        let _ = send(
+                            Event::default().event("content_block_delta").data(
+                                json!({
+                                    "type": "content_block_delta",
+                                    "index": block_index,
+                                    "delta": { "type": "thinking_delta", "thinking": t }
+                                })
+                                .to_string(),
+                            ),
+                        );
+                    }
+                    TurnEvent::Thought(_) => {}
+                    TurnEvent::Message(t) => {
+                        if text_buf.is_empty() {
+                            if thinking {
+                                let _ = send(Event::default().event("content_block_stop").data(
                                 json!({ "type": "content_block_stop", "index": block_index })
                                     .to_string(),
                             ));
-                            block_index += 1;
+                                block_index += 1;
+                            }
+                            let _ = send(
+                                Event::default().event("content_block_start").data(
+                                    json!({
+                                        "type": "content_block_start",
+                                        "index": block_index,
+                                        "content_block": { "type": "text", "text": "" }
+                                    })
+                                    .to_string(),
+                                ),
+                            );
                         }
-                        let _ = send(Event::default().event("content_block_start").data(
-                            json!({
-                                "type": "content_block_start",
-                                "index": block_index,
-                                "content_block": { "type": "text", "text": "" }
-                            })
-                            .to_string(),
-                        ));
+                        text_buf.push_str(t);
+                        let _ = send(
+                            Event::default().event("content_block_delta").data(
+                                json!({
+                                    "type": "content_block_delta",
+                                    "index": block_index,
+                                    "delta": { "type": "text_delta", "text": t }
+                                })
+                                .to_string(),
+                            ),
+                        );
                     }
-                    text_buf.push_str(t);
-                    let _ = send(Event::default().event("content_block_delta").data(
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_index,
-                            "delta": { "type": "text_delta", "text": t }
-                        })
-                        .to_string(),
-                    ));
                 }
-            }
-            Ok(())
-        })
-        .await;
+                Ok(())
+            })
+            .await;
 
         match result {
             Ok((_, outcome)) => {
@@ -307,23 +324,29 @@ async fn messages_stream(
                 }
                 let finish = stop_reason(&outcome.stop_reason);
                 let usage = usage_json(outcome.usage.as_ref());
-                let _ = send(Event::default().event("message_delta").data(
-                    json!({
-                        "type": "message_delta",
-                        "delta": { "stop_reason": finish, "stop_sequence": null },
-                        "usage": usage,
-                    })
-                    .to_string(),
-                ));
-                let _ = send(Event::default().event("message_stop").data(
-                    json!({ "type": "message_stop" }).to_string(),
-                ));
+                let _ = send(
+                    Event::default().event("message_delta").data(
+                        json!({
+                            "type": "message_delta",
+                            "delta": { "stop_reason": finish, "stop_sequence": null },
+                            "usage": usage,
+                        })
+                        .to_string(),
+                    ),
+                );
+                let _ = send(
+                    Event::default()
+                        .event("message_stop")
+                        .data(json!({ "type": "message_stop" }).to_string()),
+                );
             }
             Err(e) => {
                 tracing::error!(error = %e, "anthropic stream turn failed");
-                let _ = send(Event::default().event("error").data(
-                    error_response(&e.to_string(), "api_error").to_string(),
-                ));
+                let _ = send(
+                    Event::default()
+                        .event("error")
+                        .data(error_response(&e.to_string(), "api_error").to_string()),
+                );
             }
         }
     });

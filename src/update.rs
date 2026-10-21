@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context as _};
+use anyhow::{Context as _, bail};
 use semver::Version;
 use serde::Deserialize;
 
@@ -19,9 +19,7 @@ pub fn notify_update_available(current: &str, latest: &str, release_url: &str) {
     #[cfg(target_os = "macos")]
     {
         let body_escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
-        let script = format!(
-            r#"display notification "{body_escaped}" with title "{title}""#
-        );
+        let script = format!(r#"display notification "{body_escaped}" with title "{title}""#);
         let _ = std::process::Command::new("osascript")
             .args(["-e", &script])
             .spawn();
@@ -119,9 +117,7 @@ pub fn app_installer_asset_name() -> anyhow::Result<&'static str> {
 }
 
 pub async fn fetch_latest_release() -> anyhow::Result<ReleaseInfo> {
-    let url = format!(
-        "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest");
     let client = http_client();
     let mut req = client.get(&url).header("User-Agent", "trae-acp-gateway");
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
@@ -210,12 +206,11 @@ pub fn cli_settings_path() -> anyhow::Result<PathBuf> {
         std::env::var("APPDATA").context("APPDATA not set")?
     } else {
         let home = crate::user_home_dir().context("HOME not set")?;
-        PathBuf::from(home)
-            .join(".config")
-            .display()
-            .to_string()
+        PathBuf::from(home).join(".config").display().to_string()
     };
-    Ok(Path::new(&base).join("trae-acp-gateway").join("settings.json"))
+    Ok(Path::new(&base)
+        .join("trae-acp-gateway")
+        .join("settings.json"))
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -255,24 +250,18 @@ pub async fn apply_cli_update(yes: bool) -> anyhow::Result<()> {
     let asset_name = cli_asset_name()?;
     let check = check_for_update(asset_name).await?;
     if !check.update_available {
-        println!(
-            "Already up to date (v{}).",
-            check.current_version
-        );
+        println!("Already up to date (v{}).", check.current_version);
         return Ok(());
     }
     let Some(download_url) = check.download_url else {
-        bail!("release v{} has no asset `{asset_name}`", check.latest_version.unwrap_or_default());
-    };
-    let latest = check
-        .latest_version
-        .clone()
-        .unwrap_or_default();
-    if !yes {
-        eprintln!(
-            "Update available: v{} -> v{latest}",
-            check.current_version,
+        bail!(
+            "release v{} has no asset `{asset_name}`",
+            check.latest_version.unwrap_or_default()
         );
+    };
+    let latest = check.latest_version.clone().unwrap_or_default();
+    if !yes {
+        eprintln!("Update available: v{} -> v{latest}", check.current_version,);
         eprint!("Download and replace current binary? [y/N] ");
         use std::io::{self, Write as _};
         io::stderr().flush()?;
@@ -301,12 +290,10 @@ fn replace_cli_binary(downloaded: &Path) -> anyhow::Result<()> {
         if backup.exists() {
             std::fs::remove_file(&backup)?;
         }
-        std::fs::rename(&exe, &backup).with_context(|| {
-            format!("backing up `{}`", exe.display())
-        })?;
-        std::fs::copy(downloaded, &exe).with_context(|| {
-            format!("installing update to `{}`", exe.display())
-        })?;
+        std::fs::rename(&exe, &backup)
+            .with_context(|| format!("backing up `{}`", exe.display()))?;
+        std::fs::copy(downloaded, &exe)
+            .with_context(|| format!("installing update to `{}`", exe.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

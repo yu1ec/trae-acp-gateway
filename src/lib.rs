@@ -12,17 +12,17 @@ pub mod update;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 pub use config::{
-    default_workdir, ensure_workdir, expand_workdir, is_legacy_workdir, user_home_dir, Cli,
-    Commands, Config, UpdateAction, DEFAULT_WORKDIR_NAME,
+    Cli, Commands, Config, DEFAULT_WORKDIR_NAME, UpdateAction, default_workdir, ensure_workdir,
+    expand_workdir, is_legacy_workdir, user_home_dir,
 };
 pub use openai_responses::{GatewayState, ResponseStore};
 pub use update::{
-    app_installer_asset_name, check_for_update, cli_asset_name, download_to_temp,
-    apply_cli_update, notify_update_available, CliSettings, UpdateCheckResult, CURRENT_VERSION,
-    GITHUB_OWNER, GITHUB_REPO, GITHUB_REPO_URL,
+    CURRENT_VERSION, CliSettings, GITHUB_OWNER, GITHUB_REPO, GITHUB_REPO_URL, UpdateCheckResult,
+    app_installer_asset_name, apply_cli_update, check_for_update, cli_asset_name, download_to_temp,
+    notify_update_available,
 };
 
 pub type AppState = Arc<GatewayState>;
@@ -34,13 +34,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/messages", post(anthropic::messages))
         .route("/v1/responses", post(openai_responses::create_response))
         .route("/v1/responses/{id}", get(openai_responses::get_response))
+        // matchit forbids `{model}:generateContent` (colon is a second param).
         .route(
-            "/v1beta/models/{model}:generateContent",
-            post(gemini::generate_content),
-        )
-        .route(
-            "/v1beta/models/{model}:streamGenerateContent",
-            post(gemini::stream_generate_content),
+            "/v1beta/models/{spec}",
+            post(gemini::route_generate_content),
         )
         .route("/v1beta/models", get(gemini::list_models))
         .with_state(state)
@@ -66,8 +63,7 @@ pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<tokio::task::JoinHandle<(
 /// ACP agents reject relative cwd (`session/new`: -32602), so normalize once.
 pub fn canonicalize_workdir(cfg: &mut Config) -> anyhow::Result<()> {
     let expanded = expand_workdir(&cfg.workdir);
-    std::fs::create_dir_all(&expanded)
-        .with_context(|| format!("creating workdir `{expanded}`"))?;
+    std::fs::create_dir_all(&expanded).with_context(|| format!("creating workdir `{expanded}`"))?;
     cfg.workdir = std::fs::canonicalize(&expanded)
         .with_context(|| format!("resolving workdir `{expanded}`"))?
         .display()

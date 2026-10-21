@@ -10,8 +10,8 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_notification::NotificationExt as _;
 use trae_acp_gateway::{
-    canonicalize_workdir, default_workdir, ensure_workdir, is_legacy_workdir, serve,
-    Config as GatewayConfig, CURRENT_VERSION,
+    CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir,
+    ensure_workdir, is_legacy_workdir, serve,
 };
 
 mod update;
@@ -82,7 +82,10 @@ struct LogBuffer {
 
 impl LogBuffer {
     fn new() -> Self {
-        Self { partial: Mutex::new(String::new()), lines: Mutex::new(VecDeque::new()) }
+        Self {
+            partial: Mutex::new(String::new()),
+            lines: Mutex::new(VecDeque::new()),
+        }
     }
 
     fn push(&self, buf: &[u8]) {
@@ -204,7 +207,11 @@ fn update_tray(app: &AppHandle) {
         });
     }
     if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
-        let _ = item.set_text(if running { "Stop Gateway" } else { "Start Gateway" });
+        let _ = item.set_text(if running {
+            "Stop Gateway"
+        } else {
+            "Start Gateway"
+        });
     }
 }
 
@@ -285,7 +292,10 @@ struct Status {
 
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Status {
-    Status { running: is_running(&state), port: state.cfg.lock().unwrap().port }
+    Status {
+        running: is_running(&state),
+        port: state.cfg.lock().unwrap().port,
+    }
 }
 
 #[tauri::command]
@@ -323,7 +333,9 @@ fn get_app_version() -> String {
 
 #[tauri::command]
 async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResponse, String> {
-    let info = update::check_app_update().await.map_err(|e| e.to_string())?;
+    let info = update::check_app_update()
+        .await
+        .map_err(|e| e.to_string())?;
     if info.update_available {
         if let Some(latest) = &info.latest_version {
             notify_update_available(&app, latest);
@@ -340,23 +352,25 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResponse, String>
 
 #[tauri::command]
 async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
-    let info = update::check_app_update().await.map_err(|e| e.to_string())?;
+    let info = update::check_app_update()
+        .await
+        .map_err(|e| e.to_string())?;
     let latest = info
         .latest_version
         .clone()
         .unwrap_or_else(|| "unknown".into());
     let confirmed = app
         .dialog()
-        .message(format!(
-            "将下载 v{latest} 并启动安装程序，是否继续？"
-        ))
+        .message(format!("将下载 v{latest} 并启动安装程序，是否继续？"))
         .title("确认更新")
         .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
         .blocking_show();
     if !confirmed {
         return Err("update cancelled".into());
     }
-    update::download_and_install().await.map_err(|e| e.to_string())
+    update::download_and_install()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 struct LogWriter(Arc<LogBuffer>);
@@ -457,14 +471,11 @@ fn main() {
                 ],
             )?;
 
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .unwrap_or_else(|| {
-                    tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
-                        .expect("bundled icon is valid PNG")
-                        .to_owned()
-                });
+            let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
+                tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                    .expect("bundled icon is valid PNG")
+                    .to_owned()
+            });
             TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(false)

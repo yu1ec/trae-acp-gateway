@@ -9,13 +9,13 @@ use std::convert::Infallible;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::agent::{AgentProcess, Policy, TurnEvent};
-use crate::openai_responses::GatewayState;
 use crate::AppState;
+use crate::agent::{AgentProcess, Policy, TurnEvent};
 use crate::openai::{
     ChatRequest, chat_chunk, chat_response, error_response, finish_reason, flatten_messages,
     models_response, new_completion_id,
 };
+use crate::openai_responses::GatewayState;
 use crate::prompt::PromptBlock;
 
 /// Drive one full ACP turn: spawn, session/new, prompt, shutdown.
@@ -173,9 +173,9 @@ pub async fn chat_completions(
             Err(e) => {
                 tracing::error!(error = %e, "turn failed");
                 let _ = tx
-                    .send(Ok(Event::default().event("error").data(
-                        error_response(&e.to_string(), 500).to_string(),
-                    )))
+                    .send(Ok(Event::default()
+                        .event("error")
+                        .data(error_response(&e.to_string(), 500).to_string())))
                     .await;
             }
         }

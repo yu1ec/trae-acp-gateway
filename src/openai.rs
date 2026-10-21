@@ -95,7 +95,12 @@ pub fn models_response(models: &[crate::agent::ModelInfo]) -> Value {
     json!({ "object": "list", "data": data })
 }
 
-pub fn chat_response(id: &str, text: &str, finish: &str, usage: Option<&crate::acp::Usage>) -> Value {
+pub fn chat_response(
+    id: &str,
+    text: &str,
+    finish: &str,
+    usage: Option<&crate::acp::Usage>,
+) -> Value {
     let mut resp = json!({
         "id": id,
         "object": "chat.completion",
@@ -134,7 +139,12 @@ pub fn usage_json(usage: Option<&crate::acp::Usage>) -> Value {
 /// One SSE chunk of a streamed chat completion. `usage` attaches only to the
 /// final chunk (OpenAI `stream_options.include_usage` shape); omp reads it to
 /// compute context-window percentage.
-pub fn chat_chunk(id: &str, delta: Value, finish: Option<&str>, usage: Option<&crate::acp::Usage>) -> Value {
+pub fn chat_chunk(
+    id: &str,
+    delta: Value,
+    finish: Option<&str>,
+    usage: Option<&crate::acp::Usage>,
+) -> Value {
     let mut chunk = json!({
         "id": id,
         "object": "chat.completion.chunk",
@@ -159,9 +169,18 @@ pub fn error_response(message: &str, code: u16) -> Value {
 }
 
 pub fn new_completion_id() -> String {
-    format!("chatcmpl-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos())
+    format!(
+        "chatcmpl-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

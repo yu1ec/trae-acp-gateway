@@ -5,10 +5,7 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone)]
 pub enum PromptBlock {
     Text { text: String },
-    Image {
-        mime_type: String,
-        data_b64: String,
-    },
+    Image { mime_type: String, data_b64: String },
 }
 
 impl PromptBlock {
@@ -19,7 +16,10 @@ impl PromptBlock {
     pub fn to_acp_json(&self) -> Value {
         match self {
             PromptBlock::Text { text } => json!({ "type": "text", "text": text }),
-            PromptBlock::Image { mime_type, data_b64 } => json!({
+            PromptBlock::Image {
+                mime_type,
+                data_b64,
+            } => json!({
                 "type": "image",
                 "mimeType": mime_type,
                 "data": data_b64,
@@ -57,10 +57,9 @@ pub fn text_from_content(content: &serde_json::Value) -> String {
 pub fn blocks_from_content(content: &serde_json::Value) -> Vec<PromptBlock> {
     match content {
         serde_json::Value::String(s) if !s.is_empty() => vec![PromptBlock::text(s.clone())],
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .filter_map(|p| block_from_part(p))
-            .collect(),
+        serde_json::Value::Array(parts) => {
+            parts.iter().filter_map(|p| block_from_part(p)).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -98,7 +97,11 @@ fn anthropic_image(part: &serde_json::Value) -> Option<PromptBlock> {
 }
 
 fn openai_input_image(part: &serde_json::Value) -> Option<PromptBlock> {
-    if let Some(url) = part.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()) {
+    if let Some(url) = part
+        .get("image_url")
+        .and_then(|u| u.get("url"))
+        .and_then(|v| v.as_str())
+    {
         if let Some(rest) = url.strip_prefix("data:") {
             if let Some((mime, data)) = rest.split_once(";base64,") {
                 return Some(PromptBlock::Image {
@@ -156,9 +159,7 @@ pub fn flatten_role_messages(
         blocks.push(PromptBlock::text("\n".to_string()));
     }
     if blocks.is_empty() && system_prefix.is_some() {
-        blocks.push(PromptBlock::text(
-            system_prefix.unwrap_or("").to_string(),
-        ));
+        blocks.push(PromptBlock::text(system_prefix.unwrap_or("").to_string()));
     }
     blocks
 }

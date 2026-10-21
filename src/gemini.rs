@@ -1,22 +1,22 @@
 //! Google Gemini generateContent API (v1beta-compatible paths).
 
-use std::convert::Infallible;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::convert::Infallible;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::AppState;
 use crate::acp::Usage;
 use crate::agent::TurnEvent;
 use crate::http;
 use crate::prompt::{PromptBlock, blocks_from_gemini_parts};
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct GenerateContentRequest {
@@ -46,7 +46,11 @@ impl GenerateContentRequest {
             }
         }
         for c in &self.contents {
-            let role = if c.role.is_empty() { "user" } else { c.role.as_str() };
+            let role = if c.role.is_empty() {
+                "user"
+            } else {
+                c.role.as_str()
+            };
             let prefix = if role == "model" {
                 "[assistant]: "
             } else {
@@ -86,7 +90,12 @@ fn usage_metadata(usage: Option<&Usage>) -> Value {
     })
 }
 
-pub fn generate_response(text: &str, thought: Option<&str>, finish: &str, usage: Option<&Usage>) -> Value {
+pub fn generate_response(
+    text: &str,
+    thought: Option<&str>,
+    finish: &str,
+    usage: Option<&Usage>,
+) -> Value {
     let mut parts = Vec::new();
     if let Some(t) = thought.filter(|s| !s.is_empty()) {
         parts.push(json!({ "text": t, "thought": true }));
@@ -143,6 +152,33 @@ pub async fn list_models(
         })
         .collect();
     Ok(Json(json!({ "models": data })))
+}
+
+/// Axum cannot register `{model}:generateContent`; the last segment is `{spec}`.
+pub async fn route_generate_content(
+    state: State<AppState>,
+    Path(spec): Path<String>,
+    req: Json<GenerateContentRequest>,
+) -> Response {
+    match split_model_action(&spec) {
+        Some((model, "streamGenerateContent")) => {
+            stream_generate_content(state, Path(model.to_string()), req)
+                .await
+                .into_response()
+        }
+        Some((model, "generateContent")) => generate_content(state, Path(model.to_string()), req)
+            .await
+            .into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(gemini_error("unknown generateContent method", 404)),
+        )
+            .into_response(),
+    }
+}
+
+fn split_model_action(spec: &str) -> Option<(&str, &str)> {
+    spec.rsplit_once(':')
 }
 
 pub async fn generate_content(
@@ -230,6 +266,19 @@ pub async fn stream_generate_content(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn split_gemini_action_from_path_segment() {
+        assert_eq!(
+            split_model_action("gemini-2.0-flash:generateContent"),
+            Some(("gemini-2.0-flash", "generateContent"))
+        );
+        assert_eq!(
+            split_model_action("gemini-2.0-flash:streamGenerateContent"),
+            Some(("gemini-2.0-flash", "streamGenerateContent"))
+        );
+        assert_eq!(split_model_action("gemini-2.0-flash"), None);
+    }
 
     #[test]
     fn request_to_blocks() {

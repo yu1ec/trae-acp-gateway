@@ -9,11 +9,7 @@ pub const DEFAULT_WORKDIR_NAME: &str = "trae-acp-gateway";
 
 /// User home directory (`HOME` on Unix, `USERPROFILE` on Windows).
 pub fn user_home_dir() -> Option<String> {
-    let key = if cfg!(windows) {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    };
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var(key).ok()
 }
 
@@ -50,7 +46,12 @@ fn common_bin_dirs() -> Vec<PathBuf> {
     dirs.push(PathBuf::from("/usr/local/bin"));
     #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(local).join("Programs").join("trae").join("bin"));
+        dirs.push(
+            PathBuf::from(local)
+                .join("Programs")
+                .join("trae")
+                .join("bin"),
+        );
     }
     dirs
 }
@@ -88,7 +89,10 @@ pub fn agent_path_env() -> Option<String> {
         .collect::<Vec<_>>()
         .join(if cfg!(windows) { ";" } else { ":" });
     match std::env::var("PATH") {
-        Ok(path) if !path.is_empty() => Some(format!("{extra}{}{path}", if cfg!(windows) { ";" } else { ":" })),
+        Ok(path) if !path.is_empty() => Some(format!(
+            "{extra}{}{path}",
+            if cfg!(windows) { ";" } else { ":" }
+        )),
         _ => Some(extra),
     }
 }
@@ -215,13 +219,19 @@ mod cli_tests {
     #[test]
     fn resolve_trae_cmd_keeps_explicit_paths() {
         assert_eq!(resolve_trae_cmd("/opt/bin/traecli"), "/opt/bin/traecli");
-        assert_eq!(resolve_trae_cmd(r"C:\Tools\traecli.exe"), r"C:\Tools\traecli.exe");
+        assert_eq!(
+            resolve_trae_cmd(r"C:\Tools\traecli.exe"),
+            r"C:\Tools\traecli.exe"
+        );
     }
 
     #[test]
     fn resolve_trae_cmd_finds_local_install() {
         let home = user_home_dir().expect("HOME");
-        let candidate = PathBuf::from(&home).join(".local").join("bin").join("traecli");
+        let candidate = PathBuf::from(&home)
+            .join(".local")
+            .join("bin")
+            .join("traecli");
         if candidate.is_file() {
             assert_eq!(resolve_trae_cmd("traecli"), candidate.display().to_string());
         }

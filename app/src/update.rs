@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use trae_acp_gateway::{
-    app_installer_asset_name, check_for_update, download_to_temp, UpdateCheckResult,
-    CURRENT_VERSION,
+    CURRENT_VERSION, UpdateCheckResult, app_installer_asset_name, check_for_update,
+    download_to_temp,
 };
 
 pub async fn check_app_update() -> anyhow::Result<UpdateCheckResult> {

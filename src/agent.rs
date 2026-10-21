@@ -79,7 +79,8 @@ fn choose_permission_option(params: &Value, want: &str) -> Value {
     let chosen = options
         .iter()
         .find(|o| {
-            o.get("kind").and_then(Value::as_str)
+            o.get("kind")
+                .and_then(Value::as_str)
                 .is_some_and(|k| k.starts_with(want))
         })
         .or_else(|| options.first());
@@ -118,7 +119,10 @@ pub struct ModelInfo {
 /// standard place agents advertise their models. Unknown/missing categories
 /// and non-select entries are ignored.
 fn extract_models(session_new_result: &Value) -> Vec<ModelInfo> {
-    let Some(options) = session_new_result.get("configOptions").and_then(Value::as_array) else {
+    let Some(options) = session_new_result
+        .get("configOptions")
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
     options
@@ -136,7 +140,10 @@ fn extract_models(session_new_result: &Value) -> Vec<ModelInfo> {
                 .and_then(Value::as_str)
                 .unwrap_or(id)
                 .to_string();
-            Some(ModelInfo { id: id.to_string(), name })
+            Some(ModelInfo {
+                id: id.to_string(),
+                name,
+            })
         })
         .collect()
 }
@@ -169,14 +176,12 @@ impl AgentProcess {
         if let Some(path) = crate::config::agent_path_env() {
             command.env("PATH", path);
         }
-        let mut child = command
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "spawning agent `{cmd} {}` (install traecli or set --trae-cmd to its full path)",
-                    args.join(" ")
-                )
-            })?;
+        let mut child = command.spawn().with_context(|| {
+            format!(
+                "spawning agent `{cmd} {}` (install traecli or set --trae-cmd to its full path)",
+                args.join(" ")
+            )
+        })?;
 
         let stdout = child.stdout.take().context("agent stdout not captured")?;
         let stdin = child.stdin.take().context("agent stdin not captured")?;
@@ -209,10 +214,7 @@ impl AgentProcess {
                             continue; // ignorable notification
                         }
                         // The discriminator lives at params.update.sessionUpdate.
-                        let update = params
-                            .get("update")
-                            .cloned()
-                            .unwrap_or(Value::Null);
+                        let update = params.get("update").cloned().unwrap_or(Value::Null);
                         Event::Update(
                             serde_json::from_value::<Update>(update).unwrap_or(Update::Other),
                         )
@@ -260,13 +262,19 @@ impl AgentProcess {
     async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         let id = self.send_request(method, params).await?;
         loop {
-            match self.events.recv().await.context("agent connection closed before responding")? {
+            match self
+                .events
+                .recv()
+                .await
+                .context("agent connection closed before responding")?
+            {
                 Event::Response(resp_id, payload) => {
                     if resp_id != id {
                         bail!("response id mismatch: got {resp_id:?}, want {id:?}");
                     }
-                    return payload
-                        .map_err(|e| anyhow::anyhow!("agent error {} ({}): {}", e.code, e.message, method));
+                    return payload.map_err(|e| {
+                        anyhow::anyhow!("agent error {} ({}): {}", e.code, e.message, method)
+                    });
                 }
                 Event::Update(u) => self.queued_updates.push(u),
                 Event::AgentRequest(req_id, req_method, req_params) => {
@@ -342,7 +350,12 @@ impl AgentProcess {
         }
 
         loop {
-            match self.events.recv().await.context("agent connection closed mid-turn")? {
+            match self
+                .events
+                .recv()
+                .await
+                .context("agent connection closed mid-turn")?
+            {
                 Event::Update(u) => Self::handle_live(u, &mut text_out, on_event)?,
                 Event::AgentRequest(req_id, req_method, req_params) => {
                     let result = policy.answer(&req_method, &req_params);
@@ -352,10 +365,14 @@ impl AgentProcess {
                     if resp_id != prompt_id {
                         bail!("prompt response id mismatch: got {resp_id:?}, want {prompt_id:?}");
                     }
-                    let resp: PromptResponse = serde_json::from_value(
-                        payload.map_err(|e| anyhow::anyhow!("prompt error {}: {}", e.code, e.message))?,
-                    )
-                    .unwrap_or(PromptResponse { stop_reason: "unknown".into(), usage: None });
+                    let resp: PromptResponse =
+                        serde_json::from_value(payload.map_err(|e| {
+                            anyhow::anyhow!("prompt error {}: {}", e.code, e.message)
+                        })?)
+                        .unwrap_or(PromptResponse {
+                            stop_reason: "unknown".into(),
+                            usage: None,
+                        });
                     return Ok(TurnOutcome {
                         text: text_out,
                         stop_reason: resp.stop_reason,

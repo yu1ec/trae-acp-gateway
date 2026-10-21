@@ -26,10 +26,7 @@ pub enum Inbound {
         error: Option<Error>,
     },
     /// One-way notification (e.g. `session/update`).
-    Notification {
-        method: String,
-        params: Value,
-    },
+    Notification { method: String, params: Value },
 }
 
 /// JSON-RPC id: number or string; notification-style absent ids normalize to Null.

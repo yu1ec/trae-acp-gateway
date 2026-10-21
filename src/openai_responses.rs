@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -258,56 +258,64 @@ async fn responses_stream(
 
     tokio::spawn(async move {
         let send = |ev: Event| tx.try_send(Ok(ev));
-        let _ = send(Event::default().event("response.created").data(
-            json!({
-                "type": "response.created",
-                "response": {
-                    "id": id,
-                    "object": "response",
-                    "status": "in_progress",
-                    "model": model,
-                }
-            })
-            .to_string(),
-        ));
+        let _ = send(
+            Event::default().event("response.created").data(
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": id,
+                        "object": "response",
+                        "status": "in_progress",
+                        "model": model,
+                    }
+                })
+                .to_string(),
+            ),
+        );
         let output_item_id = format!("msg_{id}");
-        let _ = send(Event::default().event("response.output_item.added").data(
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "type": "message",
-                    "id": output_item_id,
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                }
-            })
-            .to_string(),
-        ));
-        let _ = send(Event::default().event("response.content_part.added").data(
-            json!({
-                "type": "response.content_part.added",
-                "output_index": 0,
-                "content_index": 0,
-                "part": { "type": "output_text", "text": "" },
-            })
-            .to_string(),
-        ));
+        let _ = send(
+            Event::default().event("response.output_item.added").data(
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "message",
+                        "id": output_item_id,
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": [],
+                    }
+                })
+                .to_string(),
+            ),
+        );
+        let _ = send(
+            Event::default().event("response.content_part.added").data(
+                json!({
+                    "type": "response.content_part.added",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": { "type": "output_text", "text": "" },
+                })
+                .to_string(),
+            ),
+        );
 
         let mut text_buf = String::new();
         let result = http::run_turn_with_callback(&cfg, &blocks, &mut |ev| {
             if let TurnEvent::Message(t) = ev {
                 text_buf.push_str(t);
-                let _ = send(Event::default().event("response.output_text.delta").data(
-                    json!({
-                        "type": "response.output_text.delta",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": t,
-                    })
-                    .to_string(),
-                ));
+                let _ = send(
+                    Event::default().event("response.output_text.delta").data(
+                        json!({
+                            "type": "response.output_text.delta",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": t,
+                        })
+                        .to_string(),
+                    ),
+                );
             }
             Ok(())
         })
@@ -320,29 +328,32 @@ async fn responses_stream(
                 } else {
                     text_buf
                 };
-                let _ = send(Event::default().event("response.output_text.done").data(
-                    json!({
-                        "type": "response.output_text.done",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "text": text,
-                    })
-                    .to_string(),
-                ));
-                let body = build_response(&id, &model, &text, outcome.usage.as_ref());
-                let transcript = format!(
-                    "{prev}User: {input_summary}\nAssistant: {text}\n"
+                let _ = send(
+                    Event::default().event("response.output_text.done").data(
+                        json!({
+                            "type": "response.output_text.done",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "text": text,
+                        })
+                        .to_string(),
+                    ),
                 );
+                let body = build_response(&id, &model, &text, outcome.usage.as_ref());
+                let transcript = format!("{prev}User: {input_summary}\nAssistant: {text}\n");
                 store.insert(id.clone(), body.clone(), transcript);
-                let _ = send(Event::default().event("response.completed").data(
-                    json!({ "type": "response.completed", "response": body }).to_string(),
-                ));
+                let _ =
+                    send(Event::default().event("response.completed").data(
+                        json!({ "type": "response.completed", "response": body }).to_string(),
+                    ));
             }
             Err(e) => {
                 tracing::error!(error = %e, "responses stream failed");
-                let _ = send(Event::default().event("error").data(
-                    error_response(&e.to_string(), 500).to_string(),
-                ));
+                let _ = send(
+                    Event::default()
+                        .event("error")
+                        .data(error_response(&e.to_string(), 500).to_string()),
+                );
             }
         }
     });
