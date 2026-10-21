@@ -7,6 +7,7 @@ pub mod http;
 pub mod openai;
 pub mod openai_responses;
 pub mod prompt;
+pub mod trae_cli;
 pub mod update;
 
 use std::io;
@@ -57,7 +58,11 @@ fn next_bind_port(current: u16) -> u16 {
 
 /// Bind `127.0.0.1`, starting at `preferred` and trying successive ports on `AddrInUse`.
 pub async fn bind_localhost(preferred: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
-    let preferred = if preferred == 0 { PORT_BIND_MIN } else { preferred };
+    let preferred = if preferred == 0 {
+        PORT_BIND_MIN
+    } else {
+        preferred
+    };
     let mut port = preferred;
     let mut last_addr_in_use = None;
 

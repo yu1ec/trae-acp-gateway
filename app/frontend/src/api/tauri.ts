@@ -39,6 +39,11 @@ export interface UpdateDownloadProgress {
   bytes_per_sec: number;
 }
 
+export interface TraeCliStatus {
+  installed: boolean;
+  path: string | null;
+}
+
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauri = window.__TAURI__;
   if (!tauri) {
@@ -65,6 +70,14 @@ export function getLogs(): Promise<string[]> {
 
 export function getAppVersion(): Promise<string> {
   return invoke<string>("get_app_version");
+}
+
+export function getTraeCliStatus(): Promise<TraeCliStatus> {
+  return invoke<TraeCliStatus>("get_trae_cli_status");
+}
+
+export function installTraeCli(): Promise<TraeCliStatus> {
+  return invoke<TraeCliStatus>("install_trae_cli_command");
 }
 
 export function checkForUpdate(): Promise<UpdateCheckResult> {

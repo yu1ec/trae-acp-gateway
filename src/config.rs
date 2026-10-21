@@ -46,6 +46,19 @@ fn common_bin_dirs() -> Vec<PathBuf> {
     dirs.push(PathBuf::from("/usr/local/bin"));
     #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        // Current TRAE CLI 2.0 installer locations.
+        dirs.push(
+            PathBuf::from(&local)
+                .join("Programs")
+                .join("TraeCLI")
+                .join("bin"),
+        );
+        dirs.push(
+            PathBuf::from(&local)
+                .join("Programs")
+                .join("TraeX")
+                .join("bin"),
+        );
         dirs.push(
             PathBuf::from(local)
                 .join("Programs")
@@ -56,24 +69,60 @@ fn common_bin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Windows installs `.cmd` shims (`traecli.cmd` -> `traex.exe`). `Command`
+/// cannot spawn batch files directly, so return the real executable.
+#[cfg(windows)]
+pub(crate) fn spawnable_path(path: PathBuf) -> PathBuf {
+    let is_shim = matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("cmd" | "bat" | "ps1")
+    );
+    if is_shim {
+        let exe = path.with_extension("exe");
+        if exe.is_file() {
+            return exe;
+        }
+        let traex = path.with_file_name("traex.exe");
+        if traex.is_file() {
+            return traex;
+        }
+    }
+    path
+}
+
+fn find_in_dir(dir: &std::path::Path, cmd: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let names = [
+        cmd.to_string(),
+        format!("{cmd}.exe"),
+        format!("{cmd}.cmd"),
+        format!("{cmd}.bat"),
+    ];
+    #[cfg(not(windows))]
+    let names = [cmd.to_string()];
+
+    for name in names {
+        let path = dir.join(name);
+        if path.is_file() {
+            #[cfg(windows)]
+            return Some(spawnable_path(path));
+            #[cfg(not(windows))]
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Resolve a bare agent command name to an executable path.
 pub fn resolve_trae_cmd(cmd: &str) -> String {
     if cmd.contains('/') || cmd.contains('\\') {
         return cmd.to_string();
     }
-
-    #[cfg(windows)]
-    let file_name = if cmd.ends_with(".exe") {
-        cmd.to_string()
-    } else {
-        format!("{cmd}.exe")
-    };
-    #[cfg(not(windows))]
-    let file_name = cmd.to_string();
-
     for dir in common_bin_dirs() {
-        let path = dir.join(&file_name);
-        if path.is_file() {
+        if let Some(path) = find_in_dir(&dir, cmd) {
             return path.display().to_string();
         }
     }

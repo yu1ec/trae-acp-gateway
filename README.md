@@ -7,6 +7,10 @@ OpenAI / Anthropic / Gemini 多协议兼容的本地网关，通过 ACP 协议�
 
 ## 环境要求
 
+- **TRAE CLI**（`traecli`）：网关的实际 agent，需登录 TRAE 账号。启动前会自动检测；未安装时 CLI 会提示是否运行官方安装脚本，桌面 App 会弹窗询问。
+  - macOS / Linux：`sh -c "$(curl -fsSL https://trae.cn/trae-cli/install_v2.sh)"`
+  - Windows：`irm https://trae.cn/trae-cli/install_v2.ps1 | iex`
+  - 文档：<https://docs.trae.cn/cli_about-trae-code-cli-2>
 - [Rust](https://rustup.rs/) 工具链（建议 stable）
 - **打包 App 额外需要**：
   - [Tauri CLI](https://v2.tauri.app/start/prerequisites/)：`cargo install tauri-cli --locked`

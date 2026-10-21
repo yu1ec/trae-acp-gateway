@@ -1,3 +1,5 @@
+use std::io::IsTerminal as _;
+
 use clap::Parser as _;
 
 use trae_acp_gateway::config::{Cli, Commands, UpdateAction};
@@ -52,6 +54,14 @@ async fn run_update(action: UpdateAction) -> anyhow::Result<()> {
 }
 
 async fn run_serve(mut cfg: trae_acp_gateway::Config) -> anyhow::Result<()> {
+    // Every request spawns `traecli`; fail (or offer to install) before
+    // opening the port instead of returning opaque 500s per request.
+    let resolved = trae_acp_gateway::trae_cli::ensure_installed(
+        &cfg.trae_cmd,
+        std::io::stdin().is_terminal(),
+    )?;
+    cfg.trae_cmd = resolved.display().to_string();
+
     if cfg.should_auto_check_update() {
         tokio::spawn(async {
             match cli_asset_name() {

@@ -4,6 +4,8 @@ import {
   downloadAndInstallUpdate,
   getAppVersion,
   getConfig,
+  getTraeCliStatus,
+  installTraeCli,
   pickWorkdir,
   listenUpdateProgress,
   openExternalUrl,
@@ -11,6 +13,7 @@ import {
   LOG_LEVEL_OPTIONS,
   type AppConfig,
   type LogLevelSetting,
+  type TraeCliStatus,
   type UpdateDownloadProgress,
 } from "../api/tauri";
 import "../styles/settings.css";
@@ -48,6 +51,18 @@ export default function SettingsPage() {
     useState<UpdateDownloadProgress | null>(null);
   const [status, setStatus] = useState("");
   const [manualDownloadNeeded, setManualDownloadNeeded] = useState(false);
+  const [traeCliStatus, setTraeCliStatus] = useState<TraeCliStatus | null>(
+    null,
+  );
+  const [installingTraeCli, setInstallingTraeCli] = useState(false);
+
+  const refreshTraeCliStatus = async () => {
+    try {
+      setTraeCliStatus(await getTraeCliStatus());
+    } catch {
+      setTraeCliStatus(null);
+    }
+  };
 
   useEffect(() => {
     getConfig()
@@ -66,7 +81,23 @@ export default function SettingsPage() {
     getAppVersion()
       .then((v) => setAppVersion(v))
       .catch(() => setAppVersion("unknown"));
+
+    void refreshTraeCliStatus();
   }, []);
+
+  const handleInstallTraeCli = async () => {
+    setInstallingTraeCli(true);
+    try {
+      const next = await installTraeCli();
+      setTraeCliStatus(next);
+      setStatus("TRAE CLI 安装完成。");
+    } catch (e: unknown) {
+      setStatus(`TRAE CLI 安装失败: ${e}`);
+      await refreshTraeCliStatus();
+    } finally {
+      setInstallingTraeCli(false);
+    }
+  };
 
   const handlePick = async () => {
     const dir = await pickWorkdir();
@@ -89,6 +120,7 @@ export default function SettingsPage() {
         auto_check_update: autoCheckUpdate,
       };
       await saveConfig(cfg);
+      void refreshTraeCliStatus();
       setStatus("Saved. Gateway restarted if it was running.");
     } catch (e: unknown) {
       setStatus(`Error: ${e}`);
@@ -186,6 +218,27 @@ export default function SettingsPage() {
           value={traeArgs}
           onChange={(e) => setTraeArgs(e.target.value)}
         />
+      </div>
+      <div className="row">
+        <label>TRAE CLI</label>
+        <div className="inline">
+          <span>
+            {traeCliStatus == null
+              ? "检测中…"
+              : traeCliStatus.installed
+                ? `已安装：${traeCliStatus.path ?? ""}`
+                : "未安装"}
+          </span>
+          {traeCliStatus && !traeCliStatus.installed && (
+            <button
+              type="button"
+              disabled={installingTraeCli}
+              onClick={() => void handleInstallTraeCli()}
+            >
+              {installingTraeCli ? "安装中…" : "自动安装"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="row checks">
         <label>

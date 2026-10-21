@@ -7,7 +7,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::ManagerExt as _;
-use tauri_plugin_dialog::DialogExt as _;
+use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
@@ -391,6 +391,51 @@ struct Status {
     port: u16,
 }
 
+#[derive(Serialize)]
+struct TraeCliStatus {
+    installed: bool,
+    path: Option<String>,
+}
+
+fn trae_cli_status(cmd: &str) -> TraeCliStatus {
+    match trae_acp_gateway::trae_cli::find_installed(cmd) {
+        Some(path) => TraeCliStatus {
+            installed: true,
+            path: Some(path.display().to_string()),
+        },
+        None => TraeCliStatus {
+            installed: false,
+            path: None,
+        },
+    }
+}
+
+#[tauri::command]
+fn get_trae_cli_status(state: State<'_, AppState>) -> TraeCliStatus {
+    trae_cli_status(&state.cfg.lock().unwrap().trae_cmd)
+}
+
+#[tauri::command]
+async fn install_trae_cli_command(state: State<'_, AppState>) -> Result<TraeCliStatus, String> {
+    let cmd = state.cfg.lock().unwrap().trae_cmd.clone();
+    if !trae_acp_gateway::trae_cli::is_default_traecli(&cmd) {
+        return Err(format!(
+            "当前 Trae command 为 `{cmd}`，请改为 `traecli` 后再使用自动安装"
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(trae_acp_gateway::trae_cli::install_trae_cli)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let status = trae_cli_status(&cmd);
+    if !status.installed {
+        return Err(format!(
+            "安装脚本已执行，但仍未找到 `{cmd}`；请确认安装目录已加入 PATH，或手动指定 Trae command"
+        ));
+    }
+    Ok(status)
+}
+
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Status {
     let running = is_running(&state);
@@ -483,26 +528,25 @@ async fn download_and_install_update(app: AppHandle, accelerate: bool) -> Result
     })?;
 
     let app_emit = app.clone();
-    let result = update::download_and_install(accelerate, move |downloaded, total, bytes_per_sec| {
-        let _ = app_emit.emit(
-            "update-download-progress",
-            UpdateDownloadProgress {
-                downloaded,
-                total,
-                bytes_per_sec,
-            },
-        );
-    })
-    .await;
+    let result =
+        update::download_and_install(accelerate, move |downloaded, total, bytes_per_sec| {
+            let _ = app_emit.emit(
+                "update-download-progress",
+                UpdateDownloadProgress {
+                    downloaded,
+                    total,
+                    bytes_per_sec,
+                },
+            );
+        })
+        .await;
 
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
     }
 
-    result.map_err(|e| {
-        format!("{e}. Manual download: {github_url}")
-    })
+    result.map_err(|e| format!("{e}. Manual download: {github_url}"))
 }
 
 struct LogWriter(Arc<LogBuffer>);
@@ -531,10 +575,99 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
     }
 }
 
+/// Check for the ACP agent before auto-starting. When it is missing, ask the
+/// user whether to run the official installer, then start the gateway anyway
+/// (the tray toggle stays usable and failures are logged clearly).
+async fn start_after_trae_cli_check(app: AppHandle) {
+    let cmd = app.state::<AppState>().cfg.lock().unwrap().trae_cmd.clone();
+
+    if trae_acp_gateway::trae_cli::find_installed(&cmd).is_none() {
+        tracing::warn!(cmd = %cmd, "TRAE CLI not found");
+
+        if trae_acp_gateway::trae_cli::is_default_traecli(&cmd) {
+            let dialog_app = app.clone();
+            let dialog_cmd = cmd.clone();
+            let wants_install = tauri::async_runtime::spawn_blocking(move || {
+                dialog_app
+                    .dialog()
+                    .message(format!(
+                        "未检测到 TRAE CLI（`{dialog_cmd}`），Gateway 无法处理请求。\n\n是否现在自动安装？\n\n{}",
+                        trae_acp_gateway::trae_cli::install_hint()
+                    ))
+                    .title("TRAE CLI 未安装")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "自动安装".into(),
+                        "稍后".into(),
+                    ))
+                    .blocking_show()
+            })
+            .await
+            .unwrap_or(false);
+
+            if wants_install {
+                let install = tauri::async_runtime::spawn_blocking(
+                    trae_acp_gateway::trae_cli::install_trae_cli,
+                )
+                .await;
+                match install {
+                    Ok(Ok(())) if trae_acp_gateway::trae_cli::find_installed(&cmd).is_some() => {
+                        tracing::info!("TRAE CLI installed");
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("TRAE CLI 安装完成")
+                            .body("Gateway 即将启动")
+                            .show();
+                    }
+                    Ok(Ok(())) => {
+                        tracing::warn!(cmd = %cmd, "installer finished but command still missing");
+                        notify_error(
+                            &app,
+                            "TRAE CLI 未找到",
+                            &format!(
+                                "安装脚本已执行，但仍未找到 `{cmd}`。\n请确认安装目录已加入 PATH，或在设置中手动指定 Trae command。"
+                            ),
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "TRAE CLI install failed");
+                        notify_error(
+                            &app,
+                            "TRAE CLI 安装失败",
+                            &format!(
+                                "{e}\n\n可在设置页重试，或手动安装：\n{}",
+                                trae_acp_gateway::trae_cli::install_hint()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "TRAE CLI install task failed");
+                        notify_error(&app, "TRAE CLI 安装失败", &e.to_string());
+                    }
+                }
+            }
+        } else {
+            notify_error(
+                &app,
+                "TRAE CLI 未找到",
+                &format!(
+                    "配置的 agent 命令 `{cmd}` 不存在。请在设置中检查 Trae command，或安装 TRAE CLI：\n{}",
+                    trae_acp_gateway::trae_cli::install_hint()
+                ),
+            );
+        }
+    }
+
+    let state = app.state::<AppState>();
+    if let Err(e) = start(&app, &state).await {
+        tracing::error!("auto-start failed: {e}");
+        notify_error(&app, "Gateway 启动失败", &e);
+    }
+}
+
 fn main() {
     let logs = Arc::new(LogBuffer::new());
-    let (filter_layer, log_reload) =
-        reload::Layer::new(env_filter_for_level("info"));
+    let (filter_layer, log_reload) = reload::Layer::new(env_filter_for_level("info"));
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(
@@ -569,6 +702,8 @@ fn main() {
             get_logs,
             pick_workdir,
             get_app_version,
+            get_trae_cli_status,
+            install_trae_cli_command,
             check_for_update,
             download_and_install_update,
         ])
@@ -655,13 +790,7 @@ fn main() {
 
             // Tray-manager contract: the gateway comes up with the app.
             let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<AppState>();
-                if let Err(e) = start(&app_handle, &state).await {
-                    tracing::error!("auto-start failed: {e}");
-                    notify_error(&app_handle, "Gateway 启动失败", &e);
-                }
-            });
+            tauri::async_runtime::spawn(start_after_trae_cli_check(app_handle));
 
             let auto_check = cfg.auto_check_update;
             if auto_check {
