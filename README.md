@@ -295,6 +295,49 @@ git push origin HEAD --tags
 >
 > GitHub API 未认证时限流 60 次/小时；可设置环境变量 `GITHUB_TOKEN` 提高限额。
 
+## 安装发布包
+
+### macOS
+
+发布包使用 **ad-hoc 签名**，未经过 Apple 公证。首次打开时 Gatekeeper 会拦截，按下面任一方式放行即可（只需一次）：
+
+- 到「系统设置 → 隐私与安全性」，在页面底部点击「仍要打开」
+- 或在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Trae ACP Gateway.app"
+open "/Applications/Trae ACP Gateway.app"
+```
+
+如果提示「已损坏，无法打开」，同样用上面的 `xattr` 命令清除隔离属性后再打开。
+
+> 首次运行时如果弹出「“Trae ACP Gateway” 想访问 Apple Music、你的音乐与视频活动以及你的媒体资料库」，**请点击「不允许」**。网关本身不需要媒体库权限，这个弹窗是沙箱内 agent 执行的 `find` 等搜索命令扫到受保护目录时由 macOS 触发的。清除已保存的授权可执行 `tccutil reset MediaLibrary com.trae.acp-gateway`。
+
+### Linux
+
+```bash
+# AppImage
+chmod +x Trae-ACP-Gateway-linux-x86_64.AppImage
+./Trae-ACP-Gateway-linux-x86_64.AppImage
+
+# 或 DEB
+sudo apt install ./Trae-ACP-Gateway_*_amd64.deb
+```
+
+### Windows
+
+MSI 可直接安装。若 SmartScreen 提示「已保护你的电脑」，点击「更多信息 → 仍要运行」。
+
+### CLI
+
+```bash
+# macOS / Linux
+chmod +x trae_acp_gateway-macos-universal   # 或 linux 版本
+./trae_acp_gateway-macos-universal
+```
+
+macOS 上如果 CLI 被杀毒/Gatekeeper 拦截，同样可用 `xattr -d com.apple.quarantine <文件>` 解除隔离。
+
 ## 项目结构
 
 ```

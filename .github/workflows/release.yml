@@ -126,6 +126,11 @@ jobs:
             - macOS: `.app` + DMG (Universal)
             - Linux: DEB + AppImage
             - Windows: MSI + NSIS
+
+            > macOS 安装包为 ad-hoc 签名（未公证）。首次打开如提示"无法验证开发者"，
+            > 请到「系统设置 → 隐私与安全性」点击「仍要打开」，或执行
+            > `xattr -dr com.apple.quarantine "/Applications/Trae ACP Gateway.app"`。
+            > 首次运行如弹出「想访问 Apple Music…」，请点击「不允许」，网关不需要该权限。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.tauri_args }}
@@ -163,7 +168,28 @@ jobs:
                 echo "DMG not found under $bundle_root/dmg" >&2
                 exit 1
               fi
-              cp "$dmg" /tmp/Trae-ACP-Gateway-macos-universal.dmg
+              app="$bundle_root/macos/Trae ACP Gateway.app"
+              if [ ! -d "$app" ]; then
+                echo "App bundle not found under $bundle_root/macos" >&2
+                exit 1
+              fi
+              # Ad-hoc sign the bundle. This does not make Gatekeeper trust the app,
+              # but it turns the "app is damaged" error into the overridable
+              # "unidentified developer" prompt and gives the app a stable identity.
+              codesign --force --deep --sign - "$app"
+              codesign --verify --deep --strict "$app"
+              codesign -dv "$app" 2>&1 | sed 's/^/  /'
+              # Rebuild the DMG from the signed bundle so the shipped image contains it.
+              staging=/tmp/trae-acp-gateway-dmg
+              rm -rf "$staging"
+              mkdir -p "$staging"
+              cp -R "$app" "$staging/"
+              ln -s /Applications "$staging/Applications"
+              hdiutil create -volname "Trae ACP Gateway" -srcfolder "$staging" \
+                -ov -format UDZO /tmp/Trae-ACP-Gateway-macos-universal.dmg
+              # Replace the unsigned DMG uploaded by tauri-action, then publish stable name.
+              cp /tmp/Trae-ACP-Gateway-macos-universal.dmg "/tmp/$(basename "$dmg")"
+              gh release upload "${{ github.ref_name }}" "/tmp/$(basename "$dmg")" --clobber
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-macos-universal.dmg --clobber
               ;;
             ubuntu-22.04)
