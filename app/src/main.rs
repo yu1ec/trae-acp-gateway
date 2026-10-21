@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager as _, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_notification::NotificationExt as _;
@@ -324,6 +324,14 @@ struct UpdateCheckResponse {
     update_available: bool,
     release_url: String,
     installer_name: Option<String>,
+    download_url: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct UpdateDownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+    bytes_per_sec: u64,
 }
 
 #[tauri::command]
@@ -347,30 +355,46 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResponse, String>
         update_available: info.update_available,
         release_url: info.release_url,
         installer_name: info.asset_name,
+        download_url: info.download_url,
     })
 }
 
 #[tauri::command]
-async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
+async fn download_and_install_update(app: AppHandle, accelerate: bool) -> Result<(), String> {
     let info = update::check_app_update()
         .await
         .map_err(|e| e.to_string())?;
-    let latest = info
-        .latest_version
-        .clone()
-        .unwrap_or_else(|| "unknown".into());
-    let confirmed = app
-        .dialog()
-        .message(format!("将下载 v{latest} 并启动安装程序，是否继续？"))
-        .title("确认更新")
-        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
-        .blocking_show();
-    if !confirmed {
-        return Err("update cancelled".into());
+    if !info.update_available {
+        return Err(format!("already up to date (v{CURRENT_VERSION})"));
     }
-    update::download_and_install()
-        .await
-        .map_err(|e| e.to_string())
+    let github_url = info.download_url.clone().ok_or_else(|| {
+        format!(
+            "release has no installer asset `{}`",
+            info.asset_name.unwrap_or_default()
+        )
+    })?;
+
+    let app_emit = app.clone();
+    let result = update::download_and_install(accelerate, move |downloaded, total, bytes_per_sec| {
+        let _ = app_emit.emit(
+            "update-download-progress",
+            UpdateDownloadProgress {
+                downloaded,
+                total,
+                bytes_per_sec,
+            },
+        );
+    })
+    .await;
+
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+
+    result.map_err(|e| {
+        format!("{e}. Manual download: {github_url}")
+    })
 }
 
 struct LogWriter(Arc<LogBuffer>);
@@ -471,11 +495,9 @@ fn main() {
                 ],
             )?;
 
-            let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
-                tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
-                    .expect("bundled icon is valid PNG")
-                    .to_owned()
-            });
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+                .expect("tray icon is valid PNG")
+                .to_owned();
             TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(false)
@@ -499,7 +521,7 @@ fn main() {
                             }
                         });
                     }
-                    "settings" => open_window(app, "settings", "Settings", 520.0, 480.0),
+                    "settings" => open_window(app, "settings", "Settings", 520.0, 540.0),
                     "logs" => open_window(app, "logs", "Logs", 720.0, 560.0),
                     "quit" => app.exit(0),
                     _ => {}

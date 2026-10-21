@@ -21,8 +21,8 @@ pub use config::{
 pub use openai_responses::{GatewayState, ResponseStore};
 pub use update::{
     CURRENT_VERSION, CliSettings, GITHUB_OWNER, GITHUB_REPO, GITHUB_REPO_URL, UpdateCheckResult,
-    app_installer_asset_name, apply_cli_update, check_for_update, cli_asset_name, download_to_temp,
-    notify_update_available,
+    app_installer_asset_name, apply_cli_update, candidate_download_urls, check_for_update,
+    cli_asset_name, download_to_temp, download_with_mirrors, notify_update_available,
 };
 
 pub type AppState = Arc<GatewayState>;

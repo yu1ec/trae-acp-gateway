@@ -1,8 +1,11 @@
 //! GitHub Releases update checks and asset resolution.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
+use futures_util::StreamExt as _;
 use semver::Version;
 use serde::Deserialize;
 
@@ -10,6 +13,16 @@ pub const GITHUB_OWNER: &str = "yu1ec";
 pub const GITHUB_REPO: &str = "trae-acp-gateway";
 pub const GITHUB_REPO_URL: &str = "https://github.com/yu1ec/trae-acp-gateway";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// GitHub release asset mirrors (prefix + original URL), tried in order when accelerate is on.
+const MIRROR_PREFIXES: &[&str] = &[
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://mirror.ghproxy.com/",
+];
+
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Show a desktop notification when a newer release is available (CLI / headless use).
 pub fn notify_update_available(current: &str, latest: &str, release_url: &str) {
@@ -170,32 +183,88 @@ pub async fn check_for_update(asset_name: &str) -> anyhow::Result<UpdateCheckRes
     })
 }
 
+/// Build download URL candidates: mirrors first when `accelerate`, then the original GitHub URL.
+pub fn candidate_download_urls(github_url: &str, accelerate: bool) -> Vec<String> {
+    if !accelerate {
+        return vec![github_url.to_string()];
+    }
+    let mut urls: Vec<String> = MIRROR_PREFIXES
+        .iter()
+        .map(|prefix| format!("{prefix}{github_url}"))
+        .collect();
+    urls.push(github_url.to_string());
+    urls
+}
+
 pub async fn download_to_temp(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
+    download_with_mirrors(url, filename, false, |_, _, _| {}).await
+}
+
+pub async fn download_with_mirrors(
+    github_url: &str,
+    filename: &str,
+    accelerate: bool,
+    mut on_progress: impl FnMut(u64, Option<u64>, u64),
+) -> anyhow::Result<PathBuf> {
     let client = http_client();
+    let candidates = candidate_download_urls(github_url, accelerate);
+    let mut last_err: Option<anyhow::Error> = None;
+    for url in candidates {
+        match download_url_to_temp(&client, &url, filename, &mut on_progress).await {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                tracing::warn!("download failed for `{url}`: {e:#}");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download URLs to try")))
+}
+
+async fn download_url_to_temp(
+    client: &reqwest::Client,
+    url: &str,
+    filename: &str,
+    on_progress: &mut impl FnMut(u64, Option<u64>, u64),
+) -> anyhow::Result<PathBuf> {
     let resp = client
         .get(url)
         .header("User-Agent", "trae-acp-gateway")
         .send()
         .await
-        .context("downloading release asset")?
+        .with_context(|| format!("requesting `{url}`"))?
         .error_for_status()
-        .context("download request failed")?;
+        .with_context(|| format!("HTTP error for `{url}`"))?;
 
+    let total = resp.content_length();
     let dir = std::env::temp_dir().join("trae-acp-gateway-updates");
     std::fs::create_dir_all(&dir).context("creating update temp dir")?;
     let path = dir.join(filename);
 
-    let bytes = resp
-        .bytes()
-        .await
-        .context("reading download response body")?;
-    std::fs::write(&path, &bytes).with_context(|| format!("writing `{}`", path.display()))?;
+    let mut file =
+        std::fs::File::create(&path).with_context(|| format!("creating `{}`", path.display()))?;
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let started = Instant::now();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading body from `{url}`"))?;
+        file.write_all(&chunk)
+            .with_context(|| format!("writing `{}`", path.display()))?;
+        downloaded += chunk.len() as u64;
+        let elapsed = started.elapsed().as_secs_f64().max(0.001);
+        let bytes_per_sec = (downloaded as f64 / elapsed) as u64;
+        on_progress(downloaded, total, bytes_per_sec);
+    }
+
     Ok(path)
 }
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent("trae-acp-gateway")
+        .timeout(DOWNLOAD_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .expect("reqwest client")
 }
@@ -341,5 +410,21 @@ mod tests {
     #[test]
     fn strip_v_prefix() {
         assert!(is_update_available("v0.1.0", "v0.2.0").unwrap());
+    }
+
+    #[test]
+    fn candidate_urls_accelerate_order() {
+        let gh = "https://github.com/yu1ec/trae-acp-gateway/releases/download/v0.2.0/foo.dmg";
+        let urls = candidate_download_urls(gh, true);
+        assert_eq!(urls.len(), MIRROR_PREFIXES.len() + 1);
+        assert!(urls[0].starts_with("https://ghfast.top/"));
+        assert_eq!(urls.last().map(String::as_str), Some(gh));
+    }
+
+    #[test]
+    fn candidate_urls_no_accelerate() {
+        let gh = "https://github.com/foo/bar";
+        let urls = candidate_download_urls(gh, false);
+        assert_eq!(urls, vec![gh.to_string()]);
     }
 }

@@ -5,10 +5,24 @@ import {
   getAppVersion,
   getConfig,
   pickWorkdir,
+  listenUpdateProgress,
+  openExternalUrl,
   saveConfig,
   type AppConfig,
+  type UpdateDownloadProgress,
 } from "../api/tauri";
 import "../styles/settings.css";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  return `${formatBytes(bytesPerSec)}/s`;
+}
 
 export default function SettingsPage() {
   const [port, setPort] = useState(60111);
@@ -22,9 +36,16 @@ export default function SettingsPage() {
   const [appVersion, setAppVersion] = useState("");
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [releaseDownloadUrl, setReleaseDownloadUrl] = useState<string | null>(
+    null,
+  );
+  const [accelerateDownload, setAccelerateDownload] = useState(true);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [downloadProgress, setDownloadProgress] =
+    useState<UpdateDownloadProgress | null>(null);
   const [status, setStatus] = useState("");
+  const [manualDownloadNeeded, setManualDownloadNeeded] = useState(false);
 
   useEffect(() => {
     getConfig()
@@ -74,10 +95,12 @@ export default function SettingsPage() {
 
   const handleCheckUpdate = async () => {
     setCheckingUpdate(true);
+    setManualDownloadNeeded(false);
     try {
       const info = await checkForUpdate();
       setUpdateAvailable(info.update_available);
       setLatestVersion(info.latest_version);
+      setReleaseDownloadUrl(info.download_url);
       if (info.update_available && info.latest_version) {
         setStatus(`Update available: v${info.latest_version}`);
       } else {
@@ -92,15 +115,30 @@ export default function SettingsPage() {
 
   const handleInstallUpdate = async () => {
     setInstallingUpdate(true);
+    setDownloadProgress(null);
+    setManualDownloadNeeded(false);
+    let unlisten: (() => void) | undefined;
     try {
-      await downloadAndInstallUpdate();
+      unlisten = await listenUpdateProgress((p) => setDownloadProgress(p));
+      await downloadAndInstallUpdate(accelerateDownload);
       setStatus("Installer launched. Follow the on-screen steps to finish.");
+      setDownloadProgress(null);
     } catch (e: unknown) {
+      setManualDownloadNeeded(true);
       setStatus(`Install failed: ${e}`);
     } finally {
+      unlisten?.();
       setInstallingUpdate(false);
     }
   };
+
+  const progressPercent =
+    downloadProgress?.total && downloadProgress.total > 0
+      ? Math.min(
+          100,
+          (downloadProgress.downloaded / downloadProgress.total) * 100,
+        )
+      : undefined;
 
   return (
     <div className="settings-page">
@@ -193,10 +231,23 @@ export default function SettingsPage() {
           Check for updates on startup
         </label>
       </div>
+      {updateAvailable && (
+        <div className="row checks">
+          <label>
+            <input
+              type="checkbox"
+              checked={accelerateDownload}
+              disabled={installingUpdate}
+              onChange={(e) => setAccelerateDownload(e.target.checked)}
+            />{" "}
+            加速下载（优先国内镜像）
+          </label>
+        </div>
+      )}
       <div className="row inline update-actions">
         <button
           type="button"
-          disabled={checkingUpdate}
+          disabled={checkingUpdate || installingUpdate}
           onClick={() => void handleCheckUpdate()}
         >
           {checkingUpdate ? "Checking…" : "Check now"}
@@ -207,10 +258,47 @@ export default function SettingsPage() {
             disabled={installingUpdate}
             onClick={() => void handleInstallUpdate()}
           >
-            {installingUpdate ? "Downloading…" : `Install v${latestVersion ?? ""}`}
+            {installingUpdate
+              ? "Downloading…"
+              : `Install v${latestVersion ?? ""}`}
           </button>
         )}
       </div>
+      {installingUpdate && downloadProgress && (
+        <div className="row update-progress">
+          {downloadProgress.total != null ? (
+            <progress
+              max={downloadProgress.total}
+              value={downloadProgress.downloaded}
+            />
+          ) : (
+            <progress />
+          )}
+          <div className="update-progress-meta">
+            <span>
+              {formatBytes(downloadProgress.downloaded)}
+              {downloadProgress.total != null
+                ? ` / ${formatBytes(downloadProgress.total)}`
+                : ""}
+            </span>
+            <span>{formatSpeed(downloadProgress.bytes_per_sec)}</span>
+            {progressPercent != null && (
+              <span>{progressPercent.toFixed(0)}%</span>
+            )}
+          </div>
+        </div>
+      )}
+      {manualDownloadNeeded && releaseDownloadUrl && (
+        <div className="row">
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => void openExternalUrl(releaseDownloadUrl)}
+          >
+            在浏览器中手动下载安装包
+          </button>
+        </div>
+      )}
 
       <button id="save" type="button" onClick={() => void handleSave()}>
         Save

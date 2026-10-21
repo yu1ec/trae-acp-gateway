@@ -15,6 +15,13 @@ export interface UpdateCheckResult {
   update_available: boolean;
   release_url: string;
   installer_name: string | null;
+  download_url: string | null;
+}
+
+export interface UpdateDownloadProgress {
+  downloaded: number;
+  total: number | null;
+  bytes_per_sec: number;
 }
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -49,6 +56,23 @@ export function checkForUpdate(): Promise<UpdateCheckResult> {
   return invoke<UpdateCheckResult>("check_for_update");
 }
 
-export function downloadAndInstallUpdate(): Promise<void> {
-  return invoke<void>("download_and_install_update");
+export function downloadAndInstallUpdate(accelerate: boolean): Promise<void> {
+  return invoke<void>("download_and_install_update", { accelerate });
+}
+
+export function listenUpdateProgress(
+  handler: (progress: UpdateDownloadProgress) => void,
+): Promise<() => void> {
+  const tauri = window.__TAURI__;
+  if (!tauri?.event) {
+    return Promise.reject(new Error("Tauri event API not available"));
+  }
+  return tauri.event.listen<UpdateDownloadProgress>(
+    "update-download-progress",
+    (ev) => handler(ev.payload),
+  );
+}
+
+export function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>("plugin:opener|open_url", { url });
 }

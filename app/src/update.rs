@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Context as _;
 use trae_acp_gateway::{
     CURRENT_VERSION, UpdateCheckResult, app_installer_asset_name, check_for_update,
-    download_to_temp,
+    download_with_mirrors,
 };
 
 pub async fn check_app_update() -> anyhow::Result<UpdateCheckResult> {
@@ -13,7 +13,10 @@ pub async fn check_app_update() -> anyhow::Result<UpdateCheckResult> {
     check_for_update(asset).await
 }
 
-pub async fn download_and_install() -> anyhow::Result<()> {
+pub async fn download_and_install(
+    accelerate: bool,
+    mut on_progress: impl FnMut(u64, Option<u64>, u64),
+) -> anyhow::Result<()> {
     let asset_name = app_installer_asset_name()?;
     let info = check_for_update(asset_name).await?;
     if !info.update_available {
@@ -22,12 +25,12 @@ pub async fn download_and_install() -> anyhow::Result<()> {
     let Some(url) = info.download_url else {
         anyhow::bail!("release has no installer asset `{asset_name}`");
     };
-    let path = download_to_temp(&url, asset_name).await?;
+    let path = download_with_mirrors(&url, asset_name, accelerate, &mut on_progress).await?;
     launch_installer(&path)?;
     Ok(())
 }
 
-fn launch_installer(path: &Path) -> anyhow::Result<()> {
+pub fn launch_installer(path: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
