@@ -304,19 +304,30 @@ fn update_tray(app: &AppHandle) {
 }
 
 fn open_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) {
-    if let Some(win) = app.get_webview_window(label) {
-        let _ = win.show();
-        let _ = win.set_focus();
-        return;
-    }
-    let _ = WebviewWindowBuilder::new(
-        app,
-        label,
-        WebviewUrl::App(format!("index.html#/{label}").into()),
-    )
-    .title(title)
-    .inner_size(w, h)
-    .build();
+    let win = match app.get_webview_window(label) {
+        Some(win) => win,
+        None => match WebviewWindowBuilder::new(
+            app,
+            label,
+            WebviewUrl::App(format!("index.html#/{label}").into()),
+        )
+        .title(title)
+        .inner_size(w, h)
+        .build()
+        {
+            Ok(win) => win,
+            Err(e) => {
+                tracing::error!("failed to open `{label}` window: {e}");
+                return;
+            }
+        },
+    };
+    // On macOS the app is an accessory (LSUIElement), so a freshly built window
+    // is only ordered front without activating the app. Without the explicit
+    // set_focus the first tray click looks like it did nothing.
+    let _ = win.unminimize();
+    let _ = win.show();
+    let _ = win.set_focus();
 }
 
 #[tauri::command]

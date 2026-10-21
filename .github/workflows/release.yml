@@ -38,11 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - name: Cache Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+          version: 1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -59,7 +60,10 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './app -> target'
+          # The Cargo workspace root is the repo root; `app` is just a member.
+          # The target directory must be the repo-root `target/`, not `app/target/`.
+          workspaces: '. -> target'
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -81,7 +85,9 @@ jobs:
           echo "Version OK: $TAG_VERSION"
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: tauri-cli@2
 
       - name: Build CLI
         shell: bash

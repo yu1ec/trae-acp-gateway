@@ -39,7 +39,7 @@ SIGN ?= 0
 # INIT_TARGETS=all adds all common rustup targets during init
 INIT_TARGETS ?= current
 
-.PHONY: help init init-rust init-tauri init-frontend build-cli build-frontend build-app dev-app run-cli release bump-version check-version clean
+.PHONY: help init init-rust init-tauri init-frontend icons build-cli build-frontend build-app dev-app run-cli release bump-version check-version clean
 
 .DEFAULT_GOAL := help
 
@@ -48,6 +48,7 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  init        Fetch deps, install tauri-cli, npm packages, add rustup targets"
+	@echo "  icons       Regenerate app/installer icons from app/icons/app-icon.svg"
 	@echo "  build-cli   Build CLI binary (trae_acp_gateway)"
 	@echo "  build-frontend  Build React UI to app/ui/"
 	@echo "  build-app   Build desktop app ($(APP_NAME)) installers"
@@ -137,6 +138,12 @@ init-tauri:
 init-frontend:
 	@echo "==> Installing frontend dependencies..."
 	cd $(APP_DIR)/frontend && npm install
+
+icons:
+	@echo "==> Regenerating app/installer icons from $(APP_DIR)/icons/app-icon.svg..."
+	cd $(APP_DIR) && $(CARGO) tauri icon icons/app-icon.svg
+	@rm -rf $(APP_DIR)/icons/android $(APP_DIR)/icons/ios
+	@echo "    Removed mobile icon sets (android/ios)"
 
 build-frontend:
 	@echo "==> Building frontend..."

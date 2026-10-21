@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App/installer icon: the tray mark on a rounded green tile.
+       Regenerate with `make icons` (or `cd app && cargo tauri icon icons/app-icon.svg`). -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#2B8F5E"/>
+  <g fill="#F3FBF6" transform="translate(179.2 179.2) scale(5.2)">
+    <!-- top bar -->
+    <rect x="24" y="8" width="16" height="16"/>
+    <rect x="40" y="8" width="16" height="16"/>
+    <rect x="56" y="8" width="16" height="16"/>
+    <rect x="72" y="8" width="16" height="16"/>
+    <rect x="88" y="8" width="16" height="16"/>
+    <!-- left stem -->
+    <rect x="24" y="24" width="16" height="16"/>
+    <rect x="24" y="40" width="16" height="16"/>
+    <rect x="24" y="56" width="16" height="16"/>
+    <rect x="24" y="72" width="16" height="16"/>
+    <!-- right stem -->
+    <rect x="88" y="24" width="16" height="16"/>
+    <rect x="88" y="40" width="16" height="16"/>
+    <rect x="88" y="56" width="16" height="16"/>
+    <rect x="88" y="72" width="16" height="16"/>
+    <rect x="88" y="88" width="16" height="16"/>
+    <!-- stepped lower-left -->
+    <rect x="40" y="88" width="16" height="16"/>
+    <!-- bottom bar -->
+    <rect x="24" y="104" width="16" height="16"/>
+    <rect x="40" y="104" width="16" height="16"/>
+    <rect x="56" y="104" width="16" height="16"/>
+    <rect x="72" y="104" width="16" height="16"/>
+    <rect x="88" y="104" width="16" height="16"/>
+    <!-- diamond eyes -->
+    <polygon points="48,40 56,48 48,56 40,48"/>
+    <polygon points="80,40 88,48 80,56 72,48"/>
+  </g>
+</svg>
