@@ -9,9 +9,10 @@ pub mod openai_responses;
 pub mod prompt;
 pub mod update;
 
+use std::io;
 use std::sync::Arc;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use axum::Router;
 use axum::routing::{get, post};
 pub use config::{
@@ -43,21 +44,72 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+const PORT_BIND_ATTEMPTS: u16 = 32;
+const PORT_BIND_MIN: u16 = 1024;
+
+fn next_bind_port(current: u16) -> u16 {
+    if current == 0 || current >= u16::MAX {
+        PORT_BIND_MIN
+    } else {
+        current + 1
+    }
+}
+
+/// Bind `127.0.0.1`, starting at `preferred` and trying successive ports on `AddrInUse`.
+pub async fn bind_localhost(preferred: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    let preferred = if preferred == 0 { PORT_BIND_MIN } else { preferred };
+    let mut port = preferred;
+    let mut last_addr_in_use = None;
+
+    for _ in 0..PORT_BIND_ATTEMPTS {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if port != preferred {
+                    tracing::warn!(
+                        preferred,
+                        actual = port,
+                        "preferred port in use, bound to alternate port"
+                    );
+                }
+                return Ok((listener, port));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                last_addr_in_use = Some((port, e));
+                port = next_bind_port(port);
+                if port == preferred {
+                    break;
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if let Some((port, e)) = last_addr_in_use {
+        Err(e).with_context(|| format!("no free port found after {PORT_BIND_ATTEMPTS} attempts from {preferred} (last tried {port})"))
+    } else {
+        bail!("no free port found after {PORT_BIND_ATTEMPTS} attempts from {preferred}");
+    }
+}
+
 /// Bind and serve the gateway on a background task; abort the returned handle to stop.
-pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.port));
+/// Returns the task handle and the port actually bound (may differ from `cfg.port` if occupied).
+pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<(tokio::task::JoinHandle<()>, u16)> {
+    let preferred = cfg.port;
+    let (listener, port) = bind_localhost(preferred).await?;
+    let addr = listener.local_addr()?;
     tracing::info!(%addr, cmd = %cfg.trae_cmd, args = ?cfg.trae_args, "starting gateway");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     let state = Arc::new(GatewayState {
         config: cfg.clone(),
         responses: ResponseStore::default(),
     });
     let app = router(state);
-    Ok(tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!(error = %e, "gateway server error");
         }
-    }))
+    });
+    Ok((handle, port))
 }
 
 /// ACP agents reject relative cwd (`session/new`: -32602), so normalize once.

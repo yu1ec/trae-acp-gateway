@@ -80,7 +80,7 @@ async fn run_serve(mut cfg: trae_acp_gateway::Config) -> anyhow::Result<()> {
     }
 
     trae_acp_gateway::canonicalize_workdir(&mut cfg)?;
-    let handle = trae_acp_gateway::serve(std::sync::Arc::new(cfg)).await?;
+    let (handle, _port) = trae_acp_gateway::serve(std::sync::Arc::new(cfg)).await?;
     handle.await?;
     Ok(())
 }

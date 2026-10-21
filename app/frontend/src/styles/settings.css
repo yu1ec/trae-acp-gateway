@@ -13,7 +13,8 @@
 }
 
 .settings-page input[type="text"],
-.settings-page input[type="number"] {
+.settings-page input[type="number"],
+.settings-page select {
   width: 100%;
   box-sizing: border-box;
   padding: 6px;
@@ -23,6 +24,10 @@
 
 .settings-page input[type="number"] {
   width: 120px;
+}
+
+.settings-page select {
+  max-width: 200px;
 }
 
 .settings-page .inline {

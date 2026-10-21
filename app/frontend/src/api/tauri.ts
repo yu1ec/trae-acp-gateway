@@ -1,10 +1,25 @@
+export type LogLevelSetting =
+  | "error"
+  | "warn"
+  | "info"
+  | "debug"
+  | "trace";
+
+export const LOG_LEVEL_OPTIONS: { value: LogLevelSetting; label: string }[] = [
+  { value: "error", label: "Error" },
+  { value: "warn", label: "Warn" },
+  { value: "info", label: "Info" },
+  { value: "debug", label: "Debug" },
+  { value: "trace", label: "Trace" },
+];
+
 export interface AppConfig {
   port: number;
   workdir: string;
   trae_cmd: string;
   trae_args: string[];
   sandbox: boolean;
-  debug: boolean;
+  log_level: LogLevelSetting;
   autostart: boolean;
   auto_check_update: boolean;
 }

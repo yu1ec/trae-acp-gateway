@@ -8,7 +8,9 @@ import {
   listenUpdateProgress,
   openExternalUrl,
   saveConfig,
+  LOG_LEVEL_OPTIONS,
   type AppConfig,
+  type LogLevelSetting,
   type UpdateDownloadProgress,
 } from "../api/tauri";
 import "../styles/settings.css";
@@ -30,7 +32,7 @@ export default function SettingsPage() {
   const [traeCmd, setTraeCmd] = useState("traecli");
   const [traeArgs, setTraeArgs] = useState("acp, serve");
   const [sandbox, setSandbox] = useState(true);
-  const [debug, setDebug] = useState(false);
+  const [logLevel, setLogLevel] = useState<LogLevelSetting>("info");
   const [autostart, setAutostart] = useState(false);
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
   const [appVersion, setAppVersion] = useState("");
@@ -55,7 +57,7 @@ export default function SettingsPage() {
         setTraeCmd(cfg.trae_cmd);
         setTraeArgs(cfg.trae_args.join(", "));
         setSandbox(cfg.sandbox);
-        setDebug(cfg.debug);
+        setLogLevel(cfg.log_level ?? "info");
         setAutostart(cfg.autostart);
         setAutoCheckUpdate(cfg.auto_check_update);
       })
@@ -82,7 +84,7 @@ export default function SettingsPage() {
           .map((s) => s.trim())
           .filter(Boolean),
         sandbox,
-        debug,
+        log_level: logLevel,
         autostart,
         auto_check_update: autoCheckUpdate,
       };
@@ -195,15 +197,19 @@ export default function SettingsPage() {
           Sandbox
         </label>
       </div>
-      <div className="row checks">
-        <label>
-          <input
-            type="checkbox"
-            checked={debug}
-            onChange={(e) => setDebug(e.target.checked)}
-          />{" "}
-          Debug logging
-        </label>
+      <div className="row">
+        <label htmlFor="log_level">Log level</label>
+        <select
+          id="log_level"
+          value={logLevel}
+          onChange={(e) => setLogLevel(e.target.value as LogLevelSetting)}
+        >
+          {LOG_LEVEL_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="row checks">
         <label>

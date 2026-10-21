@@ -46,11 +46,13 @@ pub struct AnthropicMessage {
 
 impl MessagesRequest {
     pub fn thinking_enabled(&self) -> bool {
+        // Claude Code 2.x sends `{"type":"adaptive","display":"updates"}` for
+        // models that reason; older clients send `{"type":"enabled",...}`.
         self.thinking
             .as_ref()
             .and_then(|v| v.get("type"))
             .and_then(|t| t.as_str())
-            == Some("enabled")
+            .is_some_and(|t| matches!(t, "enabled" | "adaptive"))
     }
 
     pub fn to_prompt_blocks(&self) -> Vec<PromptBlock> {
@@ -105,6 +107,13 @@ fn new_message_id() -> String {
     )
 }
 
+/// Claude Code expects every thinking block to carry a non-empty signature,
+/// otherwise it cannot round-trip the block. The upstream turn does not produce
+/// one, so hand out a stable placeholder.
+fn thinking_signature(id: &str) -> String {
+    format!("sig_{id}")
+}
+
 pub fn message_response(
     id: &str,
     model: &str,
@@ -117,7 +126,11 @@ pub fn message_response(
     let mut content = Vec::new();
     if thinking_enabled {
         if let Some(t) = thought.filter(|s| !s.is_empty()) {
-            content.push(json!({ "type": "thinking", "thinking": t }));
+            content.push(json!({
+                "type": "thinking",
+                "thinking": t,
+                "signature": thinking_signature(id),
+            }));
         }
     }
     content.push(json!({ "type": "text", "text": text }));
@@ -239,85 +252,119 @@ async fn messages_stream(
         );
 
         let mut block_index: u32 = 0;
-        let mut thought_buf = String::new();
-        let mut text_buf = String::new();
+        let mut thinking_open = false;
+        let mut text_open = false;
 
-        if thinking {
-            let _ = send(
-                Event::default().event("content_block_start").data(
-                    json!({
-                        "type": "content_block_start",
-                        "index": block_index,
-                        "content_block": { "type": "thinking", "thinking": "" }
-                    })
-                    .to_string(),
-                ),
-            );
-        }
-
-        let result =
-            http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
-                match ev {
-                    TurnEvent::Thought(t) if thinking => {
-                        thought_buf.push_str(t);
+        let result = http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+            match ev {
+                TurnEvent::Thought(t) if thinking => {
+                    // 思考块必须在正文之前；正文已开始后到达的思考丢弃，
+                    // 避免发出 Claude Code 无法解析的块顺序。
+                    if text_open {
+                        return Ok(());
+                    }
+                    if !thinking_open {
+                        let _ = send(
+                            Event::default().event("content_block_start").data(
+                                json!({
+                                    "type": "content_block_start",
+                                    "index": block_index,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                        "signature": ""
+                                    }
+                                })
+                                .to_string(),
+                            ),
+                        );
+                        thinking_open = true;
+                    }
+                    let _ = send(
+                        Event::default().event("content_block_delta").data(
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_index,
+                                "delta": { "type": "thinking_delta", "thinking": t }
+                            })
+                            .to_string(),
+                        ),
+                    );
+                }
+                TurnEvent::Thought(_) => {}
+                TurnEvent::Message(t) => {
+                    if thinking_open {
                         let _ = send(
                             Event::default().event("content_block_delta").data(
                                 json!({
                                     "type": "content_block_delta",
                                     "index": block_index,
-                                    "delta": { "type": "thinking_delta", "thinking": t }
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": thinking_signature(&id)
+                                    }
                                 })
                                 .to_string(),
                             ),
                         );
-                    }
-                    TurnEvent::Thought(_) => {}
-                    TurnEvent::Message(t) => {
-                        if text_buf.is_empty() {
-                            if thinking {
-                                let _ = send(Event::default().event("content_block_stop").data(
+                        let _ = send(
+                            Event::default().event("content_block_stop").data(
                                 json!({ "type": "content_block_stop", "index": block_index })
                                     .to_string(),
-                            ));
-                                block_index += 1;
-                            }
-                            let _ = send(
-                                Event::default().event("content_block_start").data(
-                                    json!({
-                                        "type": "content_block_start",
-                                        "index": block_index,
-                                        "content_block": { "type": "text", "text": "" }
-                                    })
-                                    .to_string(),
-                                ),
-                            );
-                        }
-                        text_buf.push_str(t);
+                            ),
+                        );
+                        thinking_open = false;
+                        block_index += 1;
+                    }
+                    if !text_open {
                         let _ = send(
-                            Event::default().event("content_block_delta").data(
+                            Event::default().event("content_block_start").data(
                                 json!({
-                                    "type": "content_block_delta",
+                                    "type": "content_block_start",
                                     "index": block_index,
-                                    "delta": { "type": "text_delta", "text": t }
+                                    "content_block": { "type": "text", "text": "" }
                                 })
                                 .to_string(),
                             ),
                         );
+                        text_open = true;
                     }
+                    let _ = send(
+                        Event::default().event("content_block_delta").data(
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_index,
+                                "delta": { "type": "text_delta", "text": t }
+                            })
+                            .to_string(),
+                        ),
+                    );
                 }
-                Ok(())
-            })
-            .await;
+            }
+            Ok(())
+        })
+        .await;
 
         match result {
             Ok((_, outcome)) => {
-                if thinking && text_buf.is_empty() && !thought_buf.is_empty() {
-                    // only thinking, no text block started
-                } else if !text_buf.is_empty() {
+                if thinking_open {
+                    let _ = send(
+                        Event::default().event("content_block_delta").data(
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_index,
+                                "delta": {
+                                    "type": "signature_delta",
+                                    "signature": thinking_signature(&id)
+                                }
+                            })
+                            .to_string(),
+                        ),
+                    );
                     let _ = send(Event::default().event("content_block_stop").data(
                         json!({ "type": "content_block_stop", "index": block_index }).to_string(),
                     ));
-                } else if thinking {
+                } else if text_open {
                     let _ = send(Event::default().event("content_block_stop").data(
                         json!({ "type": "content_block_stop", "index": block_index }).to_string(),
                     ));
@@ -358,6 +405,44 @@ async fn messages_stream(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn accepts_claude_code_adaptive_thinking() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "thinking": { "type": "adaptive", "display": "updates" }
+        }))
+        .unwrap();
+        assert!(req.thinking_enabled());
+    }
+
+    #[test]
+    fn accepts_legacy_enabled_thinking() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "thinking": { "type": "enabled", "budget_tokens": 4096 }
+        }))
+        .unwrap();
+        assert!(req.thinking_enabled());
+    }
+
+    #[test]
+    fn rejects_disabled_or_missing_thinking() {
+        for thinking in [json!(null), json!({ "type": "disabled" })] {
+            let req: MessagesRequest = serde_json::from_value(json!({
+                "model": "claude",
+                "max_tokens": 1024,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "thinking": thinking
+            }))
+            .unwrap();
+            assert!(!req.thinking_enabled());
+        }
+    }
 
     #[test]
     fn flattens_user_text_message() {

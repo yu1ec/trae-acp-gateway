@@ -107,7 +107,7 @@ target/release/trae_acp_gateway
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--port` | `60111` | 监听端口（仅 localhost） |
+| `--port` | `60111` | 监听端口（仅 localhost）；若被占用会依次尝试后续端口，实际地址见日志 |
 | `--workdir` | `~/trae-acp-gateway` | Agent 工作目录（macOS/Linux: `$HOME/trae-acp-gateway`，Windows: `%USERPROFILE%\\trae-acp-gateway`；不存在时自动创建） |
 | `--trae-cmd` | `traecli` | Agent 可执行文件 |
 | `--trae-args` | `acp,serve` | 传给 Agent 的参数（逗号分隔） |

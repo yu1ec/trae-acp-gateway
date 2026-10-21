@@ -9,12 +9,45 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWin
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_notification::NotificationExt as _;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
     CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir,
     ensure_workdir, is_legacy_workdir, serve,
 };
 
 mod update;
+
+const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
+
+fn default_log_level() -> String {
+    "info".into()
+}
+
+fn normalize_log_level(level: &str) -> String {
+    let l = level.trim().to_lowercase();
+    if LOG_LEVELS.contains(&l.as_str()) {
+        l
+    } else {
+        "info".into()
+    }
+}
+
+fn env_filter_for_level(level: &str) -> EnvFilter {
+    let level = normalize_log_level(level);
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "trae_acp_gateway={level},trae_acp_gateway_app={level}"
+        ))
+    })
+}
+
+type LogFilterReload = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
+
+fn apply_log_level(reload: &LogFilterReload, level: &str) -> Result<(), String> {
+    reload
+        .reload(env_filter_for_level(level))
+        .map_err(|e| e.to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -24,6 +57,11 @@ struct AppConfig {
     trae_cmd: String,
     trae_args: Vec<String>,
     sandbox: bool,
+    #[serde(default = "default_log_level")]
+    log_level: String,
+    /// Legacy field; read from old configs only.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     debug: bool,
     autostart: bool,
     auto_check_update: bool,
@@ -37,11 +75,31 @@ impl AppConfig {
             trae_cmd: "traecli".into(),
             trae_args: vec!["acp".into(), "serve".into()],
             sandbox: true,
+            log_level: default_log_level(),
             debug: false,
             autostart: false,
             auto_check_update: false,
         }
     }
+
+    fn normalize_log_level(&mut self) {
+        self.log_level = normalize_log_level(&self.log_level);
+    }
+}
+
+fn load_config_from_file(path: &std::path::Path) -> AppConfig {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return AppConfig::defaults(),
+    };
+    let mut cfg: AppConfig = serde_json::from_str(&raw).unwrap_or_else(|_| AppConfig::defaults());
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if v.get("log_level").is_none() && v.get("debug").and_then(|d| d.as_bool()) == Some(true) {
+            cfg.log_level = "debug".into();
+        }
+    }
+    cfg.normalize_log_level();
+    cfg
 }
 
 fn normalize_workdir(cfg: &mut AppConfig) {
@@ -61,13 +119,14 @@ fn persist_config(app: &AppHandle, cfg: &AppConfig) -> Result<(), String> {
 }
 
 fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
+    let verbose = matches!(cfg.log_level.as_str(), "debug" | "trace");
     GatewayConfig {
         port: cfg.port,
         workdir: cfg.workdir.clone(),
         trae_cmd: cfg.trae_cmd.clone(),
         trae_args: cfg.trae_args.clone(),
         sandbox: cfg.sandbox,
-        debug: cfg.debug,
+        debug: verbose,
         auto_check_update: false,
         no_auto_check_update: false,
     }
@@ -111,9 +170,12 @@ impl LogBuffer {
 
 struct AppState {
     cfg: Mutex<AppConfig>,
+    /// Actual TCP port when gateway is running (`None` when stopped).
+    listen_port: Mutex<Option<u16>>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop_requested: Mutex<bool>,
     logs: Arc<LogBuffer>,
+    log_reload: LogFilterReload,
     tray_status: Mutex<Option<MenuItem<tauri::Wry>>>,
     tray_toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
@@ -131,6 +193,17 @@ fn notify_update_available(app: &AppHandle, latest: &str) {
         .show();
 }
 
+fn notify_port_fallback(app: &AppHandle, preferred: u16, actual: u16) {
+    let _ = app
+        .notification()
+        .builder()
+        .title("Gateway 端口已切换")
+        .body(format!(
+            "端口 {preferred} 被占用，Gateway 已在 localhost:{actual} 运行"
+        ))
+        .show();
+}
+
 fn is_running(state: &AppState) -> bool {
     state
         .handle
@@ -143,6 +216,7 @@ fn is_running(state: &AppState) -> bool {
 
 fn stop(state: &AppState) -> bool {
     *state.stop_requested.lock().unwrap() = true;
+    *state.listen_port.lock().unwrap() = None;
     state
         .handle
         .lock()
@@ -172,6 +246,7 @@ fn watch_gateway(app: AppHandle) {
                 .unwrap_or(false);
             if crashed {
                 *state.handle.lock().unwrap() = None;
+                *state.listen_port.lock().unwrap() = None;
                 update_tray(&app);
                 notify_error(&app, "Gateway 已停止", "服务意外退出，请查看日志");
                 tracing::error!("gateway exited unexpectedly");
@@ -186,11 +261,16 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
         return Ok(());
     }
     *state.stop_requested.lock().unwrap() = false;
+    let preferred = state.cfg.lock().unwrap().port;
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
-    let handle = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
+    let (handle, actual_port) = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
+    *state.listen_port.lock().unwrap() = Some(actual_port);
     *state.handle.lock().unwrap() = Some(handle);
     update_tray(app);
+    if actual_port != preferred {
+        notify_port_fallback(app, preferred, actual_port);
+    }
     watch_gateway(app.clone());
     Ok(())
 }
@@ -198,10 +278,18 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
 fn update_tray(app: &AppHandle) {
     let state = app.state::<AppState>();
     let running = is_running(&state);
-    let port = state.cfg.lock().unwrap().port;
+    let display_port = if running {
+        state
+            .listen_port
+            .lock()
+            .unwrap()
+            .unwrap_or_else(|| state.cfg.lock().unwrap().port)
+    } else {
+        0
+    };
     if let Some(item) = state.tray_status.lock().unwrap().as_ref() {
         let _ = item.set_text(if running {
-            format!("Gateway: Running :{port}")
+            format!("Gateway: Running :{display_port}")
         } else {
             "Gateway: Stopped".into()
         });
@@ -251,6 +339,8 @@ async fn save_config(
     mut cfg: AppConfig,
 ) -> Result<(), String> {
     normalize_workdir(&mut cfg);
+    cfg.normalize_log_level();
+    apply_log_level(&state.log_reload, &cfg.log_level)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -292,10 +382,17 @@ struct Status {
 
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Status {
-    Status {
-        running: is_running(&state),
-        port: state.cfg.lock().unwrap().port,
-    }
+    let running = is_running(&state);
+    let port = if running {
+        state
+            .listen_port
+            .lock()
+            .unwrap()
+            .unwrap_or_else(|| state.cfg.lock().unwrap().port)
+    } else {
+        state.cfg.lock().unwrap().port
+    };
+    Status { running, port }
 }
 
 #[tauri::command]
@@ -425,13 +522,15 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
 
 fn main() {
     let logs = Arc::new(LogBuffer::new());
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "trae_acp_gateway=info".into()),
+    let (filter_layer, log_reload) =
+        reload::Layer::new(env_filter_for_level("info"));
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(LogWriter(logs.clone())),
         )
-        .with_ansi(false)
-        .with_writer(LogWriter(logs.clone()))
         .init();
 
     tauri::Builder::default()
@@ -464,10 +563,9 @@ fn main() {
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
-            let mut cfg = std::fs::read_to_string(data_dir.join("config.json"))
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(AppConfig::defaults);
+            let config_path = data_dir.join("config.json");
+            let mut cfg = load_config_from_file(&config_path);
+            apply_log_level(&log_reload, &cfg.log_level)?;
             let before = cfg.workdir.clone();
             normalize_workdir(&mut cfg);
             if cfg.workdir != before {
@@ -530,9 +628,11 @@ fn main() {
 
             app.manage(AppState {
                 cfg: Mutex::new(cfg.clone()),
+                listen_port: Mutex::new(None),
                 handle: Mutex::new(None),
                 stop_requested: Mutex::new(false),
                 logs: logs.clone(),
+                log_reload: log_reload.clone(),
                 tray_status: Mutex::new(Some(status)),
                 tray_toggle: Mutex::new(Some(toggle)),
             });
