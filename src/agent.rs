@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::acp::{Error, Id, Inbound, PromptResponse, TurnOutcome, Update};
+use crate::prompt::{PromptBlock, blocks_to_acp};
 
 /// Every inbound message the pump can deliver, in agent order.
 enum Event {
@@ -316,16 +317,19 @@ impl AgentProcess {
     pub async fn prompt(
         &mut self,
         session_id: &str,
-        text: &str,
+        blocks: &[PromptBlock],
         policy: &Policy,
         on_event: TurnCallback<'_>,
     ) -> anyhow::Result<TurnOutcome> {
+        if blocks.is_empty() {
+            bail!("prompt must contain at least one block");
+        }
         let prompt_id = self
             .send_request(
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": text }],
+                    "prompt": blocks_to_acp(blocks),
                 }),
             )
             .await?;

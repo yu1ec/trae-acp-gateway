@@ -1,0 +1,242 @@
+//! Google Gemini generateContent API (v1beta-compatible paths).
+
+use std::convert::Infallible;
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
+use futures_core::Stream;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::acp::Usage;
+use crate::agent::TurnEvent;
+use crate::http;
+use crate::prompt::{PromptBlock, blocks_from_gemini_parts};
+use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateContentRequest {
+    #[serde(default)]
+    pub contents: Vec<GeminiContent>,
+    #[serde(default, rename = "systemInstruction")]
+    pub system_instruction: Option<GeminiContent>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GeminiContent {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub parts: Vec<Value>,
+}
+
+impl GenerateContentRequest {
+    pub fn to_prompt_blocks(&self) -> Vec<PromptBlock> {
+        let mut blocks = Vec::new();
+        if let Some(sys) = &self.system_instruction {
+            let sys_blocks = blocks_from_gemini_parts(&sys.parts);
+            if !sys_blocks.is_empty() {
+                blocks.push(PromptBlock::text("System:\n".to_string()));
+                blocks.extend(sys_blocks);
+                blocks.push(PromptBlock::text("\n".to_string()));
+            }
+        }
+        for c in &self.contents {
+            let role = if c.role.is_empty() { "user" } else { c.role.as_str() };
+            let prefix = if role == "model" {
+                "[assistant]: "
+            } else {
+                "[user]: "
+            };
+            blocks.push(PromptBlock::text(prefix.to_string()));
+            blocks.extend(blocks_from_gemini_parts(&c.parts));
+            blocks.push(PromptBlock::text("\n".to_string()));
+        }
+        blocks
+    }
+}
+
+pub fn gemini_error(message: &str, code: i32) -> Value {
+    json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "status": "INVALID_ARGUMENT",
+        }
+    })
+}
+
+fn finish_reason(acp: &str) -> &'static str {
+    match acp {
+        "max_tokens" => "MAX_TOKENS",
+        _ => "STOP",
+    }
+}
+
+fn usage_metadata(usage: Option<&Usage>) -> Value {
+    let u = usage.cloned().unwrap_or_default();
+    json!({
+        "promptTokenCount": u.input_tokens,
+        "candidatesTokenCount": u.output_tokens,
+        "totalTokenCount": u.total_tokens,
+    })
+}
+
+pub fn generate_response(text: &str, thought: Option<&str>, finish: &str, usage: Option<&Usage>) -> Value {
+    let mut parts = Vec::new();
+    if let Some(t) = thought.filter(|s| !s.is_empty()) {
+        parts.push(json!({ "text": t, "thought": true }));
+    }
+    parts.push(json!({ "text": text }));
+    json!({
+        "candidates": [{
+            "content": { "role": "model", "parts": parts },
+            "finishReason": finish,
+            "index": 0,
+        }],
+        "usageMetadata": usage_metadata(usage),
+    })
+}
+
+pub fn stream_chunk(text: &str, thought: bool) -> Value {
+    let part = if thought {
+        json!({ "text": text, "thought": true })
+    } else {
+        json!({ "text": text })
+    };
+    json!({
+        "candidates": [{
+            "content": { "role": "model", "parts": [part] },
+            "index": 0,
+        }],
+    })
+}
+
+pub async fn list_models(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let models = match http::discover_models(state.as_ref()).await {
+        Ok(list) if !list.is_empty() => list,
+        Ok(_) => vec![crate::agent::ModelInfo {
+            id: "trae".into(),
+            name: "trae".into(),
+        }],
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(gemini_error(&format!("model discovery failed: {e}"), 500)),
+            ));
+        }
+    };
+    let data: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            json!({
+                "name": format!("models/{}", m.id),
+                "displayName": m.name,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "models": data })))
+}
+
+pub async fn generate_content(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+    Json(req): Json<GenerateContentRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let _model = model;
+    let blocks = req.to_prompt_blocks();
+    if blocks.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(gemini_error("contents must not be empty", 400)),
+        ));
+    }
+    let mut thought = String::new();
+    match http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+        if let TurnEvent::Thought(t) = ev {
+            thought.push_str(t);
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok((_, outcome)) => {
+            let body = generate_response(
+                &outcome.text,
+                if thought.is_empty() {
+                    None
+                } else {
+                    Some(&thought)
+                },
+                finish_reason(&outcome.stop_reason),
+                outcome.usage.as_ref(),
+            );
+            Ok(Json(body).into_response())
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(gemini_error(&e.to_string(), 500)),
+        )),
+    }
+}
+
+pub async fn stream_generate_content(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+    Json(req): Json<GenerateContentRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let _model = model;
+    let blocks = req.to_prompt_blocks();
+    if blocks.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(gemini_error("contents must not be empty", 400)),
+        ));
+    }
+
+    let (tx, rx) = mpsc::channel(64);
+    let cfg = state.clone();
+    tokio::spawn(async move {
+        let send = |data: Value| tx.try_send(Ok(Event::default().data(data.to_string())));
+        let result = http::run_turn_with_callback(cfg.as_ref(), &blocks, &mut |ev| {
+            match ev {
+                TurnEvent::Thought(t) => {
+                    let _ = send(stream_chunk(t, true));
+                }
+                TurnEvent::Message(t) => {
+                    let _ = send(stream_chunk(t, false));
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e, "gemini stream failed");
+            let _ = send(gemini_error(&e.to_string(), 500));
+        }
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_to_blocks() {
+        let req: GenerateContentRequest = serde_json::from_value(json!({
+            "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }]
+        }))
+        .unwrap();
+        assert!(!req.to_prompt_blocks().is_empty());
+    }
+}

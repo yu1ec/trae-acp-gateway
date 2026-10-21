@@ -1,8 +1,8 @@
 # Trae ACP Gateway
 
-OpenAI 兼容的本地网关，通过 ACP 协议对接 Trae CLI agent。项目包含两个交付形态：
+OpenAI / Anthropic / Gemini 多协议兼容的本地网关，通过 ACP 协议对接 Trae CLI agent。项目包含两个交付形态：
 
-- **CLI**（`trae_acp_gateway`）：命令行守护进程，监听 `127.0.0.1` 提供 `/v1/chat/completions` 等接口
+- **CLI**（`trae_acp_gateway`）：命令行守护进程，监听 `127.0.0.1` 提供多种 LLM HTTP 表面（见下）
 - **App**（`Trae ACP Gateway`）：基于 Tauri 2 的桌面托盘应用，内置网关并提供设置与日志界面
 
 ## 环境要求
@@ -48,6 +48,31 @@ make run-cli
 | `SIGN` | `0` | `1` 启用代码签名，本地测试保持 `0` |
 
 > Tauri App 需在目标操作系统上构建（macOS 上可构建 `universal` 通用二进制）。
+
+## HTTP API（多协议）
+
+网关绑定 `127.0.0.1`，**不校验** `Authorization` / API Key。每个 HTTP 请求会 spawn 一次 Trae agent、执行一轮 ACP `session/prompt`，然后结束进程。
+
+| 协议 | 方法 | 路径 |
+|------|------|------|
+| OpenAI Chat | POST | `/v1/chat/completions` |
+| OpenAI Models | GET | `/v1/models` |
+| OpenAI Responses | POST | `/v1/responses` |
+| OpenAI Responses 查询 | GET | `/v1/responses/{id}` |
+| Anthropic Messages | POST | `/v1/messages` |
+| Gemini generateContent | POST | `/v1beta/models/{model}:generateContent` |
+| Gemini 流式 | POST | `/v1beta/models/{model}:streamGenerateContent` |
+| Gemini Models | GET | `/v1beta/models` |
+
+流式：`stream: true`（OpenAI Chat / Responses）、Anthropic `stream: true`、Gemini 使用 `streamGenerateContent` 端点（SSE `data:` JSON）。
+
+### 能力边界（Agent 网关，非原始 LLM API）
+
+- 请求里的 **`model` 不会切换 Trae 内部模型**（与原先 Chat 行为一致）；模型列表来自 agent 的 `configOptions`。
+- 客户端 **`tools` / `functions` / `tool_choice` 等会被忽略**；响应中**不会**伪造 `tool_calls` / `tool_use` / `functionCall`。Trae 在 agent 内部自行跑工具（权限由 `--sandbox` 控制），最终只返回助手文本（流式时可带 `reasoning_content` / thinking）。
+- 不支持：`n>1`、logprobs、audio、Batch、Files、Embeddings、Vertex AI 项目路径、`count_tokens` 等。
+- **OpenAI Responses** 的 `previous_response_id`：网关用**内存**保存最近响应的 transcript 以续写；进程重启后丢失，且不等同于 OpenAI 官方的加密状态存储。
+- 文本与 **base64 图片**（Anthropic image source、OpenAI `input_image` data URL、Gemini `inlineData`）会转为 ACP prompt 块；其它 part 类型忽略。
 
 ## 打包 CLI
 
