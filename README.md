@@ -1,13 +1,15 @@
 # Trae ACP Gateway
 
+> **重要说明（2026-10-22）**：CLI 形态（`trae_acp_gateway` 可执行文件）已停止后续开发，CI/CD 不再构建或发布 CLI 二进制。桌面 App 是唯一继续维护和发布的交付形态；CLI 源码与本地构建能力暂时保留，但不再接收新功能，也不再发布更新。现有 CLI 用户请迁移到 App。
+
 OpenAI / Anthropic / Gemini 多协议兼容的本地网关，通过 ACP 协议对接 Trae CLI agent。项目包含两个交付形态：
 
-- **CLI**（`trae_acp_gateway`）：命令行守护进程，监听 `127.0.0.1` 提供多种 LLM HTTP 表面（见下）
-- **App**（`Trae ACP Gateway`）：基于 Tauri 2 的桌面托盘应用，内置网关并提供设置与日志界面
+- **App**（`Trae ACP Gateway`，推荐并持续维护）：基于 Tauri 2 的桌面托盘应用，内置网关并提供设置与日志界面
+- **CLI**（`trae_acp_gateway`，已停止维护）：命令行守护进程，监听 `127.0.0.1` 提供多种 LLM HTTP 表面（见下）；仅保留源码与本地构建说明
 
 ## 环境要求
 
-- **TRAE CLI**（`traecli`）：网关的实际 agent，需登录 TRAE 账号。启动前会自动检测；未安装时 CLI 会提示是否运行官方安装脚本，桌面 App 会弹窗询问。
+- **TRAE CLI**（`traecli`）：网关的实际 agent，需登录 TRAE 账号。启动前会自动检测；未安装时命令行形态会提示是否运行官方安装脚本，桌面 App 会弹窗询问。
   - macOS / Linux：`sh -c "$(curl -fsSL https://trae.cn/trae-cli/install_v2.sh)"`
   - Windows：`irm https://trae.cn/trae-cli/install_v2.ps1 | iex`
   - 文档：<https://docs.trae.cn/cli_about-trae-code-cli-2>
@@ -26,7 +28,7 @@ OpenAI / Anthropic / Gemini 多协议兼容的本地网关，通过 ACP 协议�
 # 首次：拉取依赖、安装 tauri-cli、添加 rustup target
 make init
 
-# 构建 CLI
+# 构建 CLI（已停止维护，仅用于本地源码构建）
 make build-cli
 
 # 构建本机 App（Trae ACP Gateway 安装包）
@@ -37,7 +39,7 @@ make build-app OS=macos ARCH=universal BUNDLES=app,dmg
 make build-app OS=linux ARCH=arm64 BUNDLES=deb
 make build-app OS=windows ARCH=x86_64 BUNDLES=msi
 
-# 开发模式 / 运行 CLI
+# 开发模式 / 运行 CLI（CLI 已停止维护）
 make dev-app
 make run-cli
 ```
@@ -78,7 +80,9 @@ make run-cli
 - **OpenAI Responses** 的 `previous_response_id`：网关用**内存**保存最近响应的 transcript 以续写；进程重启后丢失，且不等同于 OpenAI 官方的加密状态存储。
 - 文本与 **base64 图片**（Anthropic image source、OpenAI `input_image` data URL、Gemini `inlineData`）会转为 ACP prompt 块；其它 part 类型忽略。
 
-## 打包 CLI
+## 打包 CLI（已停止维护）
+
+> CLI 已停止后续开发，Release 不再提供预编译二进制。以下内容仅用于从源码本地构建；功能不再更新。
 
 在项目根目录执行：
 
@@ -144,7 +148,9 @@ target/release/trae_acp_gateway
 }
 ```
 
-### 检查与自更新
+### 检查与自更新（CLI，已停止维护）
+
+> Release 已不再发布 CLI 二进制，因此 CLI 自更新无法获取新版本。App 的自动更新不受影响。
 
 CLI 可从 GitHub Releases 检查并替换自身二进制：
 
@@ -265,7 +271,7 @@ cargo tauri build --no-sign
 
 ## 发布到 GitHub Releases
 
-推送 `v*` 格式的 tag 时，GitHub Actions 会自动在三端构建 CLI 与 App 安装包并发布到 Releases。
+推送 `v*` 格式的 tag 时，GitHub Actions 会自动在三端构建 App 安装包并发布到 Releases。CLI 已停止发布，CI 不再编译 CLI 二进制。
 
 ### 发布步骤
 
@@ -309,11 +315,11 @@ git push origin HEAD --tags
 
 ### 发布产物
 
-| 平台 | CLI | App（Tauri 默认 bundle） | App（稳定名，供自动更新） |
-|------|-----|--------------------------|---------------------------|
-| macOS | `trae_acp_gateway-macos-universal` | `.app` + DMG（Universal） | `Trae-ACP-Gateway-macos-universal.dmg` |
-| Linux | `trae_acp_gateway-linux-x86_64` | DEB + AppImage | `Trae-ACP-Gateway-linux-x86_64.AppImage` |
-| Windows | `trae_acp_gateway-windows-x86_64.exe` | MSI + NSIS | `Trae-ACP-Gateway-windows-x86_64.msi` |
+| 平台 | App（Tauri 默认 bundle） | App（稳定名，供自动更新） |
+|------|--------------------------|---------------------------|
+| macOS | `.app` + DMG（Universal） | `Trae-ACP-Gateway-macos-universal.dmg` |
+| Linux | DEB + AppImage | `Trae-ACP-Gateway-linux-x86_64.AppImage` |
+| Windows | MSI + NSIS | `Trae-ACP-Gateway-windows-x86_64.msi` |
 
 > 仓库需在 **Settings → Actions → General → Workflow permissions** 中启用 **Read and write permissions**，否则无法创建 Release。
 >
@@ -352,21 +358,15 @@ sudo apt install ./Trae-ACP-Gateway_*_amd64.deb
 
 MSI 可直接安装。若 SmartScreen 提示「已保护你的电脑」，点击「更多信息 → 仍要运行」。
 
-### CLI
+### CLI（已停止发布）
 
-```bash
-# macOS / Linux
-chmod +x trae_acp_gateway-macos-universal   # 或 linux 版本
-./trae_acp_gateway-macos-universal
-```
-
-macOS 上如果 CLI 被杀毒/Gatekeeper 拦截，同样可用 `xattr -d com.apple.quarantine <文件>` 解除隔离。
+CLI 二进制不再随 Release 发布。如仍需使用，请参考「打包 CLI（已停止维护）」从源码本地构建；建议改用桌面 App。
 
 ## 项目结构
 
 ```
 .
-├── src/              # CLI 核心库与入口（trae_acp_gateway）
+├── src/              # 网关核心库（App 复用）与 CLI 入口（CLI 已停止维护）
 ├── app/              # Tauri 桌面应用
 │   ├── src/          # App Rust 代码
 │   ├── frontend/     # React 源码（Vite）

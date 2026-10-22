@@ -19,20 +19,14 @@ jobs:
             rust_target: universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             tauri_args: '--target universal-apple-darwin --no-sign'
-            cli_path: target/universal-apple-darwin/release/trae_acp_gateway
-            cli_asset: trae_acp_gateway-macos-universal
           - platform: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             rust_targets: ''
             tauri_args: '--target x86_64-unknown-linux-gnu --no-sign'
-            cli_path: target/release/trae_acp_gateway
-            cli_asset: trae_acp_gateway-linux-x86_64
           - platform: windows-latest
             rust_target: x86_64-pc-windows-msvc
             rust_targets: ''
             tauri_args: '--target x86_64-pc-windows-msvc --no-sign'
-            cli_path: target/release/trae_acp_gateway.exe
-            cli_asset: trae_acp_gateway-windows-x86_64.exe
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -89,21 +83,6 @@ jobs:
         with:
           tool: tauri-cli@2
 
-      - name: Build CLI
-        shell: bash
-        run: |
-          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            cargo build --release --target aarch64-apple-darwin
-            cargo build --release --target x86_64-apple-darwin
-            mkdir -p target/universal-apple-darwin/release
-            lipo -create \
-              target/aarch64-apple-darwin/release/trae_acp_gateway \
-              target/x86_64-apple-darwin/release/trae_acp_gateway \
-              -output target/universal-apple-darwin/release/trae_acp_gateway
-          else
-            cargo build --release
-          fi
-
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,10 +91,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Trae ACP Gateway ${{ github.ref_name }}
           releaseBody: |
-            ## CLI
-            - `trae_acp_gateway-macos-universal` — macOS
-            - `trae_acp_gateway-linux-x86_64` — Linux
-            - `trae_acp_gateway-windows-x86_64.exe` — Windows
+            > CLI 形态已停止后续开发，Release 不再提供 CLI 二进制；请使用桌面 App。
 
             ## App (stable names for auto-update)
             - `Trae-ACP-Gateway-macos-universal.dmg` — macOS
@@ -211,12 +187,3 @@ jobs:
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-windows-x86_64.msi --clobber
               ;;
           esac
-
-      - name: Upload CLI binary
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ github.ref_name }}" \
-            "${{ matrix.cli_path }}#${{ matrix.cli_asset }}" \
-            --clobber
