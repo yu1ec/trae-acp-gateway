@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use tauri_plugin_notification::NotificationExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
     CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir,
-    ensure_workdir, is_legacy_workdir, serve,
+    default_workdir_root, ensure_workdir, is_legacy_workdir, serve,
 };
 
 mod update;
@@ -54,6 +55,9 @@ fn apply_log_level(reload: &LogFilterReload, level: &str) -> Result<(), String> 
 struct AppConfig {
     port: u16,
     workdir: String,
+    /// Client-reported workdirs must stay under this root.
+    #[serde(default = "default_workdir_root")]
+    allowed_workdir_root: String,
     trae_cmd: String,
     trae_args: Vec<String>,
     sandbox: bool,
@@ -72,6 +76,7 @@ impl AppConfig {
         Self {
             port: 60111,
             workdir: default_workdir(),
+            allowed_workdir_root: default_workdir_root(),
             trae_cmd: "traecli".into(),
             trae_args: vec!["acp".into(), "serve".into()],
             sandbox: true,
@@ -123,6 +128,7 @@ fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
     GatewayConfig {
         port: cfg.port,
         workdir: cfg.workdir.clone(),
+        allowed_workdir_root: cfg.allowed_workdir_root.clone(),
         trae_cmd: cfg.trae_cmd.clone(),
         trae_args: cfg.trae_args.clone(),
         sandbox: cfg.sandbox,
@@ -170,10 +176,10 @@ impl LogBuffer {
 
 struct AppState {
     cfg: Mutex<AppConfig>,
-    /// Actual TCP port when gateway is running (`None` when stopped).
-    listen_port: Mutex<Option<u16>>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    stop_requested: Mutex<bool>,
+    /// Bumped on every stop/start so a watcher only reports crashes for the
+    /// gateway instance it was spawned for.
+    generation: AtomicU64,
     logs: Arc<LogBuffer>,
     log_reload: LogFilterReload,
     tray_status: Mutex<Option<MenuItem<tauri::Wry>>>,
@@ -193,17 +199,6 @@ fn notify_update_available(app: &AppHandle, latest: &str) {
         .show();
 }
 
-fn notify_port_fallback(app: &AppHandle, preferred: u16, actual: u16) {
-    let _ = app
-        .notification()
-        .builder()
-        .title("Gateway 端口已切换")
-        .body(format!(
-            "端口 {preferred} 被占用，Gateway 已在 localhost:{actual} 运行"
-        ))
-        .show();
-}
-
 fn is_running(state: &AppState) -> bool {
     state
         .handle
@@ -214,27 +209,29 @@ fn is_running(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn stop(state: &AppState) -> bool {
-    *state.stop_requested.lock().unwrap() = true;
-    *state.listen_port.lock().unwrap() = None;
-    state
-        .handle
-        .lock()
-        .unwrap()
-        .take()
-        .map(|h| {
-            h.abort();
+async fn stop(state: &AppState) -> bool {
+    // Invalidate the watcher first so an intentional stop is not reported as
+    // a crash.
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    let handle = state.handle.lock().unwrap().take();
+    match handle {
+        Some(handle) => {
+            handle.abort();
+            // Wait until the task (and its listener) is actually dropped;
+            // otherwise an immediate restart can fail to bind the same port.
+            let _ = handle.await;
             true
-        })
-        .unwrap_or(false)
+        }
+        None => false,
+    }
 }
 
-fn watch_gateway(app: AppHandle) {
+fn watch_gateway(app: AppHandle, generation: u64) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let state = app.state::<AppState>();
-            if *state.stop_requested.lock().unwrap() {
+            if state.generation.load(Ordering::SeqCst) != generation {
                 break;
             }
             let crashed = state
@@ -246,7 +243,6 @@ fn watch_gateway(app: AppHandle) {
                 .unwrap_or(false);
             if crashed {
                 *state.handle.lock().unwrap() = None;
-                *state.listen_port.lock().unwrap() = None;
                 update_tray(&app);
                 notify_error(&app, "Gateway 已停止", "服务意外退出，请查看日志");
                 tracing::error!("gateway exited unexpectedly");
@@ -260,36 +256,23 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if is_running(state) {
         return Ok(());
     }
-    *state.stop_requested.lock().unwrap() = false;
-    let preferred = state.cfg.lock().unwrap().port;
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
-    let (handle, actual_port) = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
-    *state.listen_port.lock().unwrap() = Some(actual_port);
+    let (handle, _port) = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
     *state.handle.lock().unwrap() = Some(handle);
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     update_tray(app);
-    if actual_port != preferred {
-        notify_port_fallback(app, preferred, actual_port);
-    }
-    watch_gateway(app.clone());
+    watch_gateway(app.clone(), generation);
     Ok(())
 }
 
 fn update_tray(app: &AppHandle) {
     let state = app.state::<AppState>();
     let running = is_running(&state);
-    let display_port = if running {
-        state
-            .listen_port
-            .lock()
-            .unwrap()
-            .unwrap_or_else(|| state.cfg.lock().unwrap().port)
-    } else {
-        0
-    };
+    let port = state.cfg.lock().unwrap().port;
     if let Some(item) = state.tray_status.lock().unwrap().as_ref() {
         let _ = item.set_text(if running {
-            format!("Gateway: Running :{display_port}")
+            format!("Gateway: Running :{port}")
         } else {
             "Gateway: Stopped".into()
         });
@@ -364,7 +347,7 @@ async fn save_config(
         autolaunch.disable().map_err(|e| e.to_string())?;
     }
 
-    let was_running = stop(&state);
+    let was_running = stop(&state).await;
     *state.cfg.lock().unwrap() = cfg;
     if was_running {
         start(&app, &state).await?;
@@ -380,7 +363,7 @@ async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 async fn stop_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    stop(&state);
+    stop(&state).await;
     update_tray(&app);
     Ok(())
 }
@@ -439,15 +422,7 @@ async fn install_trae_cli_command(state: State<'_, AppState>) -> Result<TraeCliS
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Status {
     let running = is_running(&state);
-    let port = if running {
-        state
-            .listen_port
-            .lock()
-            .unwrap()
-            .unwrap_or_else(|| state.cfg.lock().unwrap().port)
-    } else {
-        state.cfg.lock().unwrap().port
-    };
+    let port = state.cfg.lock().unwrap().port;
     Status { running, port }
 }
 
@@ -753,7 +728,7 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             let state = app.state::<AppState>();
                             let result = if is_running(&state) {
-                                stop(&state);
+                                stop(&state).await;
                                 update_tray(&app);
                                 Ok(())
                             } else {
@@ -774,9 +749,8 @@ fn main() {
 
             app.manage(AppState {
                 cfg: Mutex::new(cfg.clone()),
-                listen_port: Mutex::new(None),
                 handle: Mutex::new(None),
-                stop_requested: Mutex::new(false),
+                generation: AtomicU64::new(0),
                 logs: logs.clone(),
                 log_reload: log_reload.clone(),
                 tray_status: Mutex::new(Some(status)),

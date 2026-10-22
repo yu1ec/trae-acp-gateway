@@ -111,14 +111,38 @@ target/release/trae_acp_gateway
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--port` | `60111` | 监听端口（仅 localhost）；若被占用会依次尝试后续端口，实际地址见日志 |
-| `--workdir` | `~/trae-acp-gateway` | Agent 工作目录（macOS/Linux: `$HOME/trae-acp-gateway`，Windows: `%USERPROFILE%\\trae-acp-gateway`；不存在时自动创建） |
+| `--port` | `60111` | 监听端口（仅 localhost）；被占用时启动直接失败并报错，不会自动切换端口 |
+| `--workdir` | `~/trae-acp-gateway` | 客户端未上报 workdir 时使用的默认 Agent 工作目录（不存在时自动创建） |
+| `--allowed-workdir-root` | `$HOME` | 允许客户端上报的 workdir 根目录；上报路径规范化后必须位于其下 |
 | `--trae-cmd` | `traecli` | Agent 可执行文件 |
 | `--trae-args` | `acp,serve` | 传给 Agent 的参数（逗号分隔） |
 | `--sandbox` | `true` | 是否保持 Agent 沙箱限制 |
 | `--debug` | — | 打印与 Agent 的 JSON-RPC 原始日志 |
 | `--auto-check-update` | — | 启动 gateway 时在后台检查 GitHub Releases 更新 |
 | `--no-auto-check-update` | — | 禁用自动检查（覆盖 settings 文件） |
+
+### 动态 workdir
+
+每个请求都会单独解析 workdir，优先级从高到低：
+
+1. 请求头 `X-Trae-Workdir`（Claude Code 可用 `ANTHROPIC_CUSTOM_HEADERS` 发送）
+2. 请求体字段：OpenAI `workdir`、Responses `workdir` / `metadata.workdir`
+3. Claude Code 注入的 `# Environment` 块中的 `- Primary working directory: ...`
+4. system prompt 中的 `Working directory: ...`
+5. `--workdir` 配置值
+
+上报路径必须是已存在的绝对目录，且规范化（解析符号链接）后位于 `--allowed-workdir-root` 下；
+不满足时显式来源返回 400，自动解析来源则回退到配置值。解析结果及来源会以 `debug` 级别记录。
+
+```jsonc
+// <project>/.claude/settings.json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:60111",
+    "ANTHROPIC_CUSTOM_HEADERS": "X-Trae-Workdir: /Users/me/project"
+  }
+}
+```
 
 ### 检查与自更新
 

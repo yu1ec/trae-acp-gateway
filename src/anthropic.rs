@@ -55,15 +55,29 @@ impl MessagesRequest {
             .is_some_and(|t| matches!(t, "enabled" | "adaptive"))
     }
 
-    pub fn to_prompt_blocks(&self) -> Vec<PromptBlock> {
-        let system_text = self
-            .system
+    /// Flattened client system prompt (string or content blocks).
+    pub fn system_text(&self) -> Option<String> {
+        self.system
             .as_ref()
             .map(|s| match s {
                 Value::String(t) => t.clone(),
                 other => text_from_content(other),
             })
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The harness-injected environment block (the only place Claude Code
+    /// reports its cwd). Scans user turns newest-first so a later `cd` wins.
+    pub fn environment_context_text(&self) -> Option<String> {
+        const MARKER: &str = "You have been invoked in the following environment";
+        self.messages.iter().rev().find_map(|m| {
+            let text = text_from_content(&m.content);
+            text.contains(MARKER).then_some(text)
+        })
+    }
+
+    pub fn to_prompt_blocks(&self) -> Vec<PromptBlock> {
+        let system_text = self.system_text();
         crate::prompt::flatten_role_messages(
             system_text.as_deref(),
             &self
@@ -148,6 +162,7 @@ pub fn message_response(
 
 pub async fn messages(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<MessagesRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     if req.messages.is_empty() {
@@ -160,6 +175,25 @@ pub async fn messages(
         ));
     }
     let _ = req.max_tokens;
+    let system_text = req.system_text();
+    let environment_context = req.environment_context_text();
+    let workdir = http::resolve_workdir(
+        &state,
+        &headers,
+        None,
+        environment_context.as_deref(),
+        system_text.as_deref(),
+    )
+    .map_err(|e| {
+        tracing::warn!(error = %e, "invalid workdir");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error_response(
+                &format!("invalid workdir: {e}"),
+                "invalid_request_error",
+            )),
+        )
+    })?;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -171,9 +205,11 @@ pub async fn messages(
         ));
     }
     if req.stream {
-        Ok(messages_stream(state, req, blocks).await.into_response())
+        Ok(messages_stream(state, workdir, req, blocks)
+            .await
+            .into_response())
     } else {
-        messages_buffered(state, req, blocks).await
+        messages_buffered(state, workdir, req, blocks).await
     }
 }
 
@@ -181,6 +217,7 @@ use axum::response::IntoResponse;
 
 async fn messages_buffered(
     state: AppState,
+    workdir: String,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -189,7 +226,7 @@ async fn messages_buffered(
     let thinking = req.thinking_enabled();
     let mut thought = String::new();
 
-    match http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+    match http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
         if let TurnEvent::Thought(t) = ev {
             thought.push_str(t);
         }
@@ -221,6 +258,7 @@ async fn messages_buffered(
 
 async fn messages_stream(
     state: AppState,
+    workdir: String,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -231,8 +269,21 @@ async fn messages_stream(
     let state = state.clone();
 
     tokio::spawn(async move {
-        let send = |ev: Event| tx.try_send(Ok(ev));
-        let _ = send(
+        // A failed try_send means the client is gone (receiver dropped) or is
+        // too slow; abort the turn so the spawned agent is killed instead of
+        // leaking.
+        let send = |ev: Event| -> anyhow::Result<()> {
+            match tx.try_send(Ok(ev)) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    anyhow::bail!("SSE buffer full; aborting turn")
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    anyhow::bail!("client disconnected mid-turn")
+                }
+            }
+        };
+        if send(
             Event::default().event("message_start").data(
                 json!({
                     "type": "message_start",
@@ -249,13 +300,17 @@ async fn messages_stream(
                 })
                 .to_string(),
             ),
-        );
+        )
+        .is_err()
+        {
+            return;
+        }
 
         let mut block_index: u32 = 0;
         let mut thinking_open = false;
         let mut text_open = false;
 
-        let result = http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+        let result = http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
             match ev {
                 TurnEvent::Thought(t) if thinking => {
                     // 思考块必须在正文之前；正文已开始后到达的思考丢弃，
@@ -264,7 +319,7 @@ async fn messages_stream(
                         return Ok(());
                     }
                     if !thinking_open {
-                        let _ = send(
+                        send(
                             Event::default().event("content_block_start").data(
                                 json!({
                                     "type": "content_block_start",
@@ -277,10 +332,10 @@ async fn messages_stream(
                                 })
                                 .to_string(),
                             ),
-                        );
+                        )?;
                         thinking_open = true;
                     }
-                    let _ = send(
+                    send(
                         Event::default().event("content_block_delta").data(
                             json!({
                                 "type": "content_block_delta",
@@ -289,12 +344,12 @@ async fn messages_stream(
                             })
                             .to_string(),
                         ),
-                    );
+                    )?;
                 }
                 TurnEvent::Thought(_) => {}
                 TurnEvent::Message(t) => {
                     if thinking_open {
-                        let _ = send(
+                        send(
                             Event::default().event("content_block_delta").data(
                                 json!({
                                     "type": "content_block_delta",
@@ -306,18 +361,18 @@ async fn messages_stream(
                                 })
                                 .to_string(),
                             ),
-                        );
-                        let _ = send(
+                        )?;
+                        send(
                             Event::default().event("content_block_stop").data(
                                 json!({ "type": "content_block_stop", "index": block_index })
                                     .to_string(),
                             ),
-                        );
+                        )?;
                         thinking_open = false;
                         block_index += 1;
                     }
                     if !text_open {
-                        let _ = send(
+                        send(
                             Event::default().event("content_block_start").data(
                                 json!({
                                     "type": "content_block_start",
@@ -326,10 +381,10 @@ async fn messages_stream(
                                 })
                                 .to_string(),
                             ),
-                        );
+                        )?;
                         text_open = true;
                     }
-                    let _ = send(
+                    send(
                         Event::default().event("content_block_delta").data(
                             json!({
                                 "type": "content_block_delta",
@@ -338,7 +393,7 @@ async fn messages_stream(
                             })
                             .to_string(),
                         ),
-                    );
+                    )?;
                 }
             }
             Ok(())
@@ -388,12 +443,18 @@ async fn messages_stream(
                 );
             }
             Err(e) => {
-                tracing::error!(error = %e, "anthropic stream turn failed");
-                let _ = send(
-                    Event::default()
-                        .event("error")
-                        .data(error_response(&e.to_string(), "api_error").to_string()),
-                );
+                if tx.is_closed() {
+                    // Client hung up: the turn was already aborted and the
+                    // agent killed, so there is nobody left to send to.
+                    tracing::debug!(error = %e, "anthropic client disconnected; turn aborted");
+                } else {
+                    tracing::error!(error = %e, "anthropic stream turn failed");
+                    let _ = send(
+                        Event::default()
+                            .event("error")
+                            .data(error_response(&e.to_string(), "api_error").to_string()),
+                    );
+                }
             }
         }
     });
@@ -442,6 +503,23 @@ mod tests {
             .unwrap();
             assert!(!req.thinking_enabled());
         }
+    }
+
+    #[test]
+    fn extracts_latest_environment_context() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [
+                { "role": "user", "content": "# Environment\nYou have been invoked in the following environment: \n - Primary working directory: /old" },
+                { "role": "assistant", "content": "ok" },
+                { "role": "user", "content": [{ "type": "text", "text": "# Environment\nYou have been invoked in the following environment: \n - Primary working directory: /new" }] }
+            ]
+        }))
+        .unwrap();
+        let context = req.environment_context_text().unwrap();
+        assert!(context.contains("/new"), "{context}");
+        assert!(!context.contains("/old"), "{context}");
     }
 
     #[test]

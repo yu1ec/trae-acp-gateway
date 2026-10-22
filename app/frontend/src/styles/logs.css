@@ -69,10 +69,49 @@
   font: 12px ui-monospace, Menlo, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-all;
+  /* Keep the viewport anchored while paused; new lines must not drag it. */
+  overflow-anchor: none;
 }
 
 .log-line {
   line-height: 1.45;
+}
+
+.log-json {
+  margin: 3px 0 6px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(128, 128, 128, 0.35);
+  background: rgba(128, 128, 128, 0.08);
+  border-radius: 0 4px 4px 0;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  word-break: normal;
+  line-height: 1.4;
+}
+
+.log-json-toggle {
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-json-caret {
+  margin-right: 3px;
+  color: #6f9ef0;
+}
+
+.log-json-preview {
+  opacity: 0.7;
+}
+
+.log-json-toggle:hover .log-json-preview {
+  opacity: 1;
 }
 
 .log-line .ts {

@@ -1,7 +1,9 @@
 //! HTTP handlers bridging protocol-specific requests to ACP turns.
 
+use anyhow::Context as _;
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
 use serde_json::Value;
@@ -18,17 +20,51 @@ use crate::openai::{
 use crate::openai_responses::GatewayState;
 use crate::prompt::PromptBlock;
 
+/// Resolve the workdir for one request.
+pub fn resolve_workdir(
+    cfg: &GatewayState,
+    headers: &HeaderMap,
+    body: Option<&str>,
+    environment_context: Option<&str>,
+    system_prompt: Option<&str>,
+) -> anyhow::Result<String> {
+    let header = headers
+        .get(crate::config::WORKDIR_HEADER)
+        .map(|v| {
+            v.to_str()
+                .context("X-Trae-Workdir header is not valid UTF-8")
+        })
+        .transpose()?;
+    let c = &cfg.config;
+    let resolved = crate::config::resolve_request_workdir(
+        header,
+        body,
+        environment_context,
+        system_prompt,
+        &c.workdir,
+        &c.allowed_workdir_root,
+    )?;
+    tracing::debug!(
+        workdir = %resolved.path,
+        source = resolved.source.as_str(),
+        "resolved request workdir"
+    );
+    Ok(resolved.path)
+}
+
 /// Drive one full ACP turn: spawn, session/new, prompt, shutdown.
 pub async fn run_turn(
     cfg: &GatewayState,
+    workdir: &str,
     blocks: &[PromptBlock],
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
-    run_turn_with_callback(cfg, blocks, &mut |_| Ok(())).await
+    run_turn_with_callback(cfg, workdir, blocks, &mut |_| Ok(())).await
 }
 
 /// Drive one full ACP turn with live streaming through `on_event`.
 pub async fn run_turn_with_callback(
     cfg: &GatewayState,
+    workdir: &str,
     blocks: &[PromptBlock],
     on_event: &mut (dyn FnMut(TurnEvent<'_>) -> anyhow::Result<()> + Send),
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
@@ -38,9 +74,11 @@ pub async fn run_turn_with_callback(
     } else {
         Policy::ApproveAll
     };
-    let mut agent = AgentProcess::spawn(&c.trae_cmd, &c.trae_args, &c.workdir).await?;
+    // The process cwd and the ACP session cwd must agree: tools resolve
+    // relative paths against the session, while the agent itself starts here.
+    let mut agent = AgentProcess::spawn(&c.trae_cmd, &c.trae_args, workdir).await?;
     let outcome = async {
-        let info = agent.new_session(&c.workdir).await?;
+        let info = agent.new_session(workdir).await?;
         let outcome = agent
             .prompt(&info.session_id, blocks, &policy, on_event)
             .await?;
@@ -85,6 +123,7 @@ pub async fn models(
 
 pub async fn chat_completions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (axum::http::StatusCode, Json<Value>)>
 {
@@ -94,6 +133,14 @@ pub async fn chat_completions(
             Json(error_response("messages must not be empty", 400)),
         ));
     }
+    let workdir =
+        resolve_workdir(&state, &headers, req.workdir.as_deref(), None, None).map_err(|e| {
+            tracing::warn!(error = %e, "invalid workdir");
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(error_response(&format!("invalid workdir: {e}"), 400)),
+            )
+        })?;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
     let completion_id = new_completion_id();
 
@@ -120,7 +167,7 @@ pub async fn chat_completions(
             let tx = tx.clone();
             let completion_id = completion_id.clone();
             let mut client_gone = false;
-            let turn = run_turn_with_callback(&cfg, &blocks, &mut |ev| {
+            let turn = run_turn_with_callback(&cfg, &workdir, &blocks, &mut |ev| {
                 let ev = match ev {
                     TurnEvent::Message(text) => chat_chunk(
                         &completion_id,
@@ -186,6 +233,7 @@ pub async fn chat_completions(
 
 pub async fn chat_completions_buffered(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     if req.messages.is_empty() {
@@ -194,10 +242,18 @@ pub async fn chat_completions_buffered(
             Json(error_response("messages must not be empty", 400)),
         ));
     }
+    let workdir =
+        resolve_workdir(&state, &headers, req.workdir.as_deref(), None, None).map_err(|e| {
+            tracing::warn!(error = %e, "invalid workdir");
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(error_response(&format!("invalid workdir: {e}"), 400)),
+            )
+        })?;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
     let completion_id = new_completion_id();
 
-    match run_turn(&state, &blocks).await {
+    match run_turn(&state, &workdir, &blocks).await {
         Ok((_, outcome)) => Ok(Json(chat_response(
             &completion_id,
             &outcome.text,

@@ -65,9 +65,24 @@ pub struct ResponsesRequest {
     pub stream: bool,
     #[serde(default)]
     pub previous_response_id: Option<String>,
+    /// Non-standard extension; `metadata.workdir` is accepted as well.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 impl ResponsesRequest {
+    /// Body-supplied workdir, if any.
+    pub fn requested_workdir(&self) -> Option<&str> {
+        self.workdir.as_deref().or_else(|| {
+            self.metadata
+                .as_ref()?
+                .get("workdir")
+                .and_then(Value::as_str)
+        })
+    }
+
     pub fn to_prompt_blocks(&self, store: &ResponseStore) -> Vec<PromptBlock> {
         let mut blocks = Vec::new();
         if let Some(prev) = &self.previous_response_id {
@@ -186,8 +201,17 @@ pub fn build_response(id: &str, model: &str, text: &str, usage: Option<&Usage>) 
 
 pub async fn create_response(
     State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ResponsesRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let workdir = http::resolve_workdir(&state, &headers, req.requested_workdir(), None, None)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "invalid workdir");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(error_response(&format!("invalid workdir: {e}"), 400)),
+            )
+        })?;
     let blocks = req.to_prompt_blocks(&state.responses);
     if blocks.is_empty() {
         return Err((
@@ -196,14 +220,17 @@ pub async fn create_response(
         ));
     }
     if req.stream {
-        Ok(responses_stream(state, req, blocks).await.into_response())
+        Ok(responses_stream(state, workdir, req, blocks)
+            .await
+            .into_response())
     } else {
-        responses_buffered(state, req, blocks).await
+        responses_buffered(state, workdir, req, blocks).await
     }
 }
 
 async fn responses_buffered(
     state: SharedState,
+    workdir: String,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -217,7 +244,7 @@ async fn responses_buffered(
         .map(|s| s.transcript.clone())
         .unwrap_or_default();
 
-    match http::run_turn(state.as_ref(), &blocks).await {
+    match http::run_turn(state.as_ref(), &workdir, &blocks).await {
         Ok((_, outcome)) => {
             let body = build_response(&id, &model, &outcome.text, outcome.usage.as_ref());
             let transcript = format!(
@@ -240,6 +267,7 @@ async fn responses_buffered(
 
 async fn responses_stream(
     state: SharedState,
+    workdir: String,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -302,7 +330,7 @@ async fn responses_stream(
         );
 
         let mut text_buf = String::new();
-        let result = http::run_turn_with_callback(&cfg, &blocks, &mut |ev| {
+        let result = http::run_turn_with_callback(&cfg, &workdir, &blocks, &mut |ev| {
             if let TurnEvent::Message(t) = ev {
                 text_buf.push_str(t);
                 let _ = send(

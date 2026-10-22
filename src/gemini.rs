@@ -157,18 +157,21 @@ pub async fn list_models(
 /// Axum cannot register `{model}:generateContent`; the last segment is `{spec}`.
 pub async fn route_generate_content(
     state: State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(spec): Path<String>,
     req: Json<GenerateContentRequest>,
 ) -> Response {
     match split_model_action(&spec) {
         Some((model, "streamGenerateContent")) => {
-            stream_generate_content(state, Path(model.to_string()), req)
+            stream_generate_content(state, headers, Path(model.to_string()), req)
                 .await
                 .into_response()
         }
-        Some((model, "generateContent")) => generate_content(state, Path(model.to_string()), req)
-            .await
-            .into_response(),
+        Some((model, "generateContent")) => {
+            generate_content(state, headers, Path(model.to_string()), req)
+                .await
+                .into_response()
+        }
         _ => (
             StatusCode::NOT_FOUND,
             Json(gemini_error("unknown generateContent method", 404)),
@@ -183,10 +186,17 @@ fn split_model_action(spec: &str) -> Option<(&str, &str)> {
 
 pub async fn generate_content(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(model): Path<String>,
     Json(req): Json<GenerateContentRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let _model = model;
+    let workdir = http::resolve_workdir(&state, &headers, None, None, None).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(gemini_error(&format!("invalid workdir: {e}"), 400)),
+        )
+    })?;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -195,7 +205,7 @@ pub async fn generate_content(
         ));
     }
     let mut thought = String::new();
-    match http::run_turn_with_callback(state.as_ref(), &blocks, &mut |ev| {
+    match http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
         if let TurnEvent::Thought(t) = ev {
             thought.push_str(t);
         }
@@ -225,10 +235,17 @@ pub async fn generate_content(
 
 pub async fn stream_generate_content(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(model): Path<String>,
     Json(req): Json<GenerateContentRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     let _model = model;
+    let workdir = http::resolve_workdir(&state, &headers, None, None, None).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(gemini_error(&format!("invalid workdir: {e}"), 400)),
+        )
+    })?;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -241,7 +258,7 @@ pub async fn stream_generate_content(
     let cfg = state.clone();
     tokio::spawn(async move {
         let send = |data: Value| tx.try_send(Ok(Event::default().data(data.to_string())));
-        let result = http::run_turn_with_callback(cfg.as_ref(), &blocks, &mut |ev| {
+        let result = http::run_turn_with_callback(cfg.as_ref(), &workdir, &blocks, &mut |ev| {
             match ev {
                 TurnEvent::Thought(t) => {
                     let _ = send(stream_chunk(t, true));

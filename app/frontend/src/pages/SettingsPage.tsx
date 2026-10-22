@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   checkForUpdate,
   downloadAndInstallUpdate,
@@ -6,7 +6,6 @@ import {
   getConfig,
   getTraeCliStatus,
   installTraeCli,
-  pickWorkdir,
   listenUpdateProgress,
   openExternalUrl,
   saveConfig,
@@ -31,7 +30,8 @@ function formatSpeed(bytesPerSec: number): string {
 
 export default function SettingsPage() {
   const [port, setPort] = useState(60111);
-  const [workdir, setWorkdir] = useState("");
+  // No longer editable: keep the configured value so saving doesn't reset it.
+  const workdirRef = useRef("");
   const [traeCmd, setTraeCmd] = useState("traecli");
   const [traeArgs, setTraeArgs] = useState("acp, serve");
   const [sandbox, setSandbox] = useState(true);
@@ -68,7 +68,7 @@ export default function SettingsPage() {
     getConfig()
       .then((cfg) => {
         setPort(cfg.port);
-        setWorkdir(cfg.workdir);
+        workdirRef.current = cfg.workdir;
         setTraeCmd(cfg.trae_cmd);
         setTraeArgs(cfg.trae_args.join(", "));
         setSandbox(cfg.sandbox);
@@ -99,16 +99,11 @@ export default function SettingsPage() {
     }
   };
 
-  const handlePick = async () => {
-    const dir = await pickWorkdir();
-    if (dir) setWorkdir(dir);
-  };
-
   const handleSave = async () => {
     try {
       const cfg: AppConfig = {
         port: parseInt(String(port), 10) || 60111,
-        workdir: workdir.trim(),
+        workdir: workdirRef.current,
         trae_cmd: traeCmd.trim() || "traecli",
         trae_args: traeArgs
           .split(",")
@@ -186,20 +181,6 @@ export default function SettingsPage() {
           value={port}
           onChange={(e) => setPort(Number(e.target.value))}
         />
-      </div>
-      <div className="row">
-        <label htmlFor="workdir">Workdir</label>
-        <div className="inline">
-          <input
-            type="text"
-            id="workdir"
-            value={workdir}
-            onChange={(e) => setWorkdir(e.target.value)}
-          />
-          <button type="button" onClick={() => void handlePick()}>
-            Choose…
-          </button>
-        </div>
       </div>
       <div className="row">
         <label htmlFor="trae_cmd">Trae command</label>

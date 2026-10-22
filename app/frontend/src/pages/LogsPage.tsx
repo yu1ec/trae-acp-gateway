@@ -13,6 +13,11 @@ export default function LogsPage() {
   const [levels, setLevels] = useState<Set<LogLevel>>(defaultLevels);
   const { lines, pending, clearPending } = useLogs(paused);
   const viewerRef = useRef<HTMLDivElement>(null);
+  // Scroll events can fire while new lines are appended (browser scroll
+  // anchoring), so read the latest pause state synchronously instead of the
+  // value captured when this render's handler was created.
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
 
   const visibleLines = useMemo(
     () => filterLines(lines, levels, search),
@@ -37,22 +42,20 @@ export default function LogsPage() {
   }, [lines.length, paused, goBottom]);
 
   const handleTogglePause = () => {
-    setPaused((p) => {
-      const next = !p;
-      if (!next) {
-        clearPending();
-        requestAnimationFrame(goBottom);
-      }
-      return next;
-    });
+    if (paused) {
+      setPaused(false);
+      clearPending();
+      requestAnimationFrame(goBottom);
+    } else {
+      setPaused(true);
+    }
   };
 
   const handleScroll = () => {
-    const wantPaused = !atBottom();
-    if (wantPaused !== paused) {
-      setPaused(wantPaused);
-      if (!wantPaused) clearPending();
-    }
+    // Once paused, only the Resume button may resume: appended lines and
+    // scroll anchoring fire scroll events that would otherwise flip it back.
+    if (pausedRef.current) return;
+    if (!atBottom()) setPaused(true);
   };
 
   const toggleLevel = (level: LogLevel) => {

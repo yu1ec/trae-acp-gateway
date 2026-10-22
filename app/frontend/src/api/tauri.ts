@@ -60,10 +60,6 @@ export function saveConfig(cfg: AppConfig): Promise<void> {
   return invoke<void>("save_config", { cfg });
 }
 
-export function pickWorkdir(): Promise<string | null> {
-  return invoke<string | null>("pick_workdir");
-}
-
 export function getLogs(): Promise<string[]> {
   return invoke<string[]>("get_logs");
 }

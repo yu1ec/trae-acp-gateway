@@ -14,6 +14,9 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub stream: bool,
+    /// Non-standard extension: per-request agent working directory.
+    #[serde(default)]
+    pub workdir: Option<String>,
     // Unrecognized fields (temperature, tools, ...) are ignored by serde.
 }
 
