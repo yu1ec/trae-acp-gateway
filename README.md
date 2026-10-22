@@ -249,6 +249,12 @@ App 设置页提供：
 
 App 配置保存在 `{app_data_dir}/config.json`，字段 `auto_check_update`（默认 `false`）。
 
+### 思考面板
+
+设置页勾选 **启用思考面板** 并保存后，可从设置页的「打开思考面板」或托盘菜单的 **Open Thoughts** 打开一个置顶悬浮面板。面板实时滚动显示 ACP `agent_thought_chunk` 思考流，支持搜索高亮、清除、绿色/黑色两种皮肤、面板内调整透明度，以及通过图钉按钮切换是否置顶。
+
+思考流通过独立 side channel 展示，不会伪造成 Anthropic thinking 块写回响应，因此不会影响 Claude Code 的工具执行；即使客户端没有开启 thinking，面板也能看到 agent 的真实思考输出。
+
 ### 单独构建前端
 
 ```bash

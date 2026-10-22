@@ -7,6 +7,7 @@ pub mod http;
 pub mod openai;
 pub mod openai_responses;
 pub mod prompt;
+pub mod thought;
 pub mod trae_cli;
 pub mod update;
 
@@ -22,6 +23,7 @@ pub use config::{
     workdir_from_system_prompt,
 };
 pub use openai_responses::{GatewayState, ResponseStore};
+pub use thought::{ThoughtSink, ThoughtUpdate};
 pub use update::{
     CURRENT_VERSION, CliSettings, GITHUB_OWNER, GITHUB_REPO, GITHUB_REPO_URL, UpdateCheckResult,
     app_installer_asset_name, apply_cli_update, candidate_download_urls, check_for_update,
@@ -59,6 +61,15 @@ pub async fn bind_localhost(port: u16) -> anyhow::Result<tokio::net::TcpListener
 /// Returns the task handle and the port actually bound (`cfg.port`, or the
 /// OS-assigned port when `cfg.port` is 0).
 pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<(tokio::task::JoinHandle<()>, u16)> {
+    serve_with_thoughts(cfg, None).await
+}
+
+/// Like [`serve`], but forwards ACP reasoning chunks to `thought_sink`.
+/// The CLI and any headless user keeps using [`serve`].
+pub async fn serve_with_thoughts(
+    cfg: Arc<Config>,
+    thought_sink: Option<ThoughtSink>,
+) -> anyhow::Result<(tokio::task::JoinHandle<()>, u16)> {
     let listener = bind_localhost(cfg.port)
         .await
         .with_context(|| format!("starting gateway on 127.0.0.1:{}", cfg.port))?;
@@ -68,6 +79,7 @@ pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<(tokio::task::JoinHandle<
     let state = Arc::new(GatewayState {
         config: cfg.clone(),
         responses: ResponseStore::default(),
+        thought_sink,
     });
     let app = router(state);
     let handle = tokio::spawn(async move {

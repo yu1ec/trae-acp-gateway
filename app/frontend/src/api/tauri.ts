@@ -22,6 +22,22 @@ export interface AppConfig {
   log_level: LogLevelSetting;
   autostart: boolean;
   auto_check_update: boolean;
+  thought_panel_enabled: boolean;
+}
+
+export interface ThoughtSegment {
+  session_id: string;
+  workdir: string;
+  started_at: number;
+  ended_at: number | null;
+  prompt: string;
+  text: string;
+}
+
+export interface ThoughtSnapshot {
+  segments: ThoughtSegment[];
+  version: number;
+  enabled: boolean;
 }
 
 export interface UpdateCheckResult {
@@ -68,6 +84,22 @@ export function clearLogs(): Promise<void> {
   return invoke<void>("clear_logs");
 }
 
+export function getThoughts(): Promise<ThoughtSnapshot> {
+  return invoke<ThoughtSnapshot>("get_thoughts");
+}
+
+export function clearThoughts(): Promise<void> {
+  return invoke<void>("clear_thoughts");
+}
+
+export function showSettingsWindow(): Promise<void> {
+  return invoke<void>("show_settings_window");
+}
+
+export function showThoughtsWindow(): Promise<void> {
+  return invoke<void>("show_thoughts_window");
+}
+
 export function getAppVersion(): Promise<string> {
   return invoke<string>("get_app_version");
 }
@@ -103,4 +135,62 @@ export function listenUpdateProgress(
 
 export function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("plugin:opener|open_url", { url });
+}
+
+function currentWindow(): TauriWindowHandle | null {
+  return window.__TAURI__?.window?.getCurrentWindow() ?? null;
+}
+
+export async function getWindowSize(): Promise<TauriWindowSize | null> {
+  try {
+    return (await currentWindow()?.innerSize()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resize the current window using logical pixels. */
+export async function setWindowLogicalSize(
+  width: number,
+  height: number,
+): Promise<void> {
+  const win = currentWindow();
+  const LogicalSize = window.__TAURI__?.window?.LogicalSize;
+  if (!win || !LogicalSize) return;
+  await win.setSize(new LogicalSize(width, height));
+}
+
+/** Restore a size previously reported by `getWindowSize` (physical pixels). */
+export async function setWindowPhysicalSize(
+  size: TauriWindowSize,
+): Promise<void> {
+  const win = currentWindow();
+  const PhysicalSize = window.__TAURI__?.window?.PhysicalSize;
+  if (!win || !PhysicalSize) return;
+  await win.setSize(new PhysicalSize(size.width, size.height));
+}
+
+export async function getWindowScaleFactor(): Promise<number> {
+  try {
+    return (await currentWindow()?.scaleFactor()) ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+export async function closeCurrentWindow(): Promise<void> {
+  await currentWindow()?.close();
+}
+
+/** Pin the current window above every other app window. */
+export async function setWindowAlwaysOnTop(onTop: boolean): Promise<void> {
+  await currentWindow()?.setAlwaysOnTop(onTop);
+}
+
+export async function isWindowAlwaysOnTop(): Promise<boolean | null> {
+  try {
+    return (await currentWindow()?.isAlwaysOnTop()) ?? null;
+  } catch {
+    return null;
+  }
 }

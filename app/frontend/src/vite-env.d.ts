@@ -15,9 +15,34 @@ interface TauriEvent {
   ): Promise<() => void>;
 }
 
+interface TauriWindowSize {
+  width: number;
+  height: number;
+}
+
+interface TauriWindowHandle {
+  innerSize(): Promise<TauriWindowSize>;
+  scaleFactor(): Promise<number>;
+  setSize(size: unknown): Promise<void>;
+  close(): Promise<void>;
+  setAlwaysOnTop(onTop: boolean): Promise<void>;
+  isAlwaysOnTop(): Promise<boolean>;
+}
+
+interface TauriSizeCtor {
+  new (width: number, height: number): unknown;
+}
+
+interface TauriWindowModule {
+  getCurrentWindow(): TauriWindowHandle;
+  LogicalSize: TauriSizeCtor;
+  PhysicalSize: TauriSizeCtor;
+}
+
 interface TauriGlobal {
   core: TauriCore;
   event?: TauriEvent;
+  window?: TauriWindowModule;
 }
 
 interface Window {

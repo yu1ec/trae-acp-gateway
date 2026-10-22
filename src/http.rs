@@ -19,6 +19,7 @@ use crate::openai::{
 };
 use crate::openai_responses::GatewayState;
 use crate::prompt::PromptBlock;
+use crate::thought::ThoughtUpdate;
 
 /// Resolve the workdir for one request.
 pub fn resolve_workdir(
@@ -61,6 +62,34 @@ pub async fn run_turn(
     run_turn_with_callback(cfg, workdir, blocks, &mut |_| Ok(())).await
 }
 
+/// Best-effort one-line hint of what this turn asked for, shown as the
+/// segment title in the thought panel. OpenAI chat flattens the whole
+/// conversation into a single block, so pull out the last `[user]:` entry;
+/// every other protocol sends one block per message part.
+fn prompt_hint(blocks: &[PromptBlock]) -> String {
+    let text = match blocks {
+        [PromptBlock::Text { text }] => last_user_turn(text).unwrap_or(text.as_str()),
+        _ => blocks
+            .iter()
+            .rev()
+            .find_map(|block| match block {
+                PromptBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or(""),
+    };
+    text.trim().chars().take(600).collect()
+}
+
+fn last_user_turn(text: &str) -> Option<&str> {
+    const MARKER: &str = "[user]: ";
+    let rest = &text[text.rfind(MARKER)? + MARKER.len()..];
+    Some(match rest.find("\n[assistant]: ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    })
+}
+
 /// Drive one full ACP turn with live streaming through `on_event`.
 pub async fn run_turn_with_callback(
     cfg: &GatewayState,
@@ -77,15 +106,50 @@ pub async fn run_turn_with_callback(
     // The process cwd and the ACP session cwd must agree: tools resolve
     // relative paths against the session, while the agent itself starts here.
     let mut agent = AgentProcess::spawn(&c.trae_cmd, &c.trae_args, workdir).await?;
-    let outcome = async {
-        let info = agent.new_session(workdir).await?;
-        let outcome = agent
-            .prompt(&info.session_id, blocks, &policy, on_event)
-            .await?;
-        Ok((info, outcome))
-    }
-    .await;
+    // Fan reasoning chunks out to the host panel in addition to whatever the
+    // protocol handler does with them. This is independent of the client's
+    // `thinking` flag: the panel always sees the real ACP stream.
+    let sink = cfg.thought_sink.clone();
+    let prompt = prompt_hint(blocks);
+    let mut thought_started = false;
+    // Kept outside the async block so the panel still gets an `End` when the
+    // turn fails after its first reasoning chunk.
+    let mut thought_session: Option<String> = None;
+    let outcome = {
+        async {
+            let info = agent.new_session(workdir).await?;
+            let session_id = info.session_id.clone();
+            thought_session = Some(session_id.clone());
+            let mut forward = |ev: TurnEvent<'_>| {
+                if let (Some(sink), TurnEvent::Thought(text)) = (&sink, &ev) {
+                    if !thought_started {
+                        sink(ThoughtUpdate::Start {
+                            session_id: session_id.clone(),
+                            workdir: workdir.to_string(),
+                            prompt: prompt.clone(),
+                        });
+                        thought_started = true;
+                    }
+                    sink(ThoughtUpdate::Delta {
+                        session_id: session_id.clone(),
+                        text: (*text).to_string(),
+                    });
+                }
+                on_event(ev)
+            };
+            let outcome = agent
+                .prompt(&info.session_id, blocks, &policy, &mut forward)
+                .await?;
+            Ok((info, outcome))
+        }
+        .await
+    };
     agent.shutdown().await;
+    if let (true, Some(session_id)) = (thought_started, thought_session) {
+        if let Some(sink) = &sink {
+            sink(ThoughtUpdate::End { session_id });
+        }
+    }
     outcome
 }
 

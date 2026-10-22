@@ -22,6 +22,7 @@ use crate::config::Config;
 use crate::http;
 use crate::openai::{error_response, usage_json};
 use crate::prompt::{PromptBlock, blocks_from_content, text_from_content};
+use crate::thought::ThoughtSink;
 
 #[derive(Clone, Default)]
 pub struct ResponseStore {
@@ -50,6 +51,8 @@ impl ResponseStore {
 pub struct GatewayState {
     pub config: Arc<Config>,
     pub responses: ResponseStore,
+    /// Host-side side channel for reasoning chunks (desktop thought panel).
+    pub thought_sink: Option<ThoughtSink>,
 }
 
 pub type SharedState = Arc<GatewayState>;

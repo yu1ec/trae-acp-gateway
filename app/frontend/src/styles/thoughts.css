@@ -1,0 +1,680 @@
+/* A floating HUD pane: transparent window, translucent glass card, hairline
+   accent frame and corner brackets. All colors derive from the two skin
+   variables so the green and black skins keep their own contrast. */
+.thoughts-window {
+  --thought-alpha: 0.82;
+  --paper-rgb: 233 244 216;
+  --ink-rgb: 30 42 25;
+  --accent: 44 122 64;
+  --mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  box-sizing: border-box;
+  height: 100%;
+  padding: 8px;
+  color: rgb(var(--ink-rgb));
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+.thoughts-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid rgb(var(--accent) / 0.3);
+  border-radius: 14px;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgb(var(--ink-rgb) / 0.022) 0 1px,
+      transparent 1px 4px
+    ),
+    radial-gradient(
+      140% 90% at 50% -10%,
+      rgb(var(--accent) / 0.13),
+      transparent 62%
+    ),
+    rgb(var(--paper-rgb) / var(--thought-alpha));
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--ink-rgb) / 0.05),
+    inset 0 0 70px rgb(var(--accent) / 0.07);
+  backdrop-filter: blur(16px) saturate(1.08);
+  -webkit-backdrop-filter: blur(16px) saturate(1.08);
+}
+
+/* Corner brackets read as a viewfinder overlay instead of a document card. */
+.thoughts-card::before,
+.thoughts-card::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  width: 20px;
+  height: 20px;
+  border-style: solid;
+  border-color: rgb(var(--accent) / 0.55);
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.thoughts-card::before {
+  top: 7px;
+  left: 7px;
+  border-width: 1px 0 0 1px;
+  border-top-left-radius: 6px;
+}
+
+.thoughts-card::after {
+  right: 7px;
+  bottom: 7px;
+  border-width: 0 1px 1px 0;
+  border-bottom-right-radius: 6px;
+}
+
+/* The toolbar is chrome, not content: it only surfaces while the pointer is
+   over the panel, leaving the pane itself uncluttered. */
+.thoughts-toolbar {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 46px;
+  padding: 0 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+  user-select: none;
+}
+
+.thoughts-window:hover .thoughts-toolbar,
+.thoughts-toolbar:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.thoughts-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.thoughts-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: rgb(var(--ink-rgb) / 0.58);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.thoughts-icon-btn:hover:not(:disabled) {
+  background: rgb(var(--ink-rgb) / 0.07);
+  color: rgb(var(--ink-rgb) / 0.9);
+}
+
+.thoughts-icon-btn:active:not(:disabled) {
+  background: rgb(var(--ink-rgb) / 0.11);
+  color: rgb(var(--ink-rgb) / 0.94);
+}
+
+/* Active means pinned / popover open: the accent reads as a HUD toggle. */
+.thoughts-icon-btn.is-active,
+.thoughts-icon-btn.is-active:hover:not(:disabled) {
+  background: rgb(var(--accent) / 0.14);
+  box-shadow: inset 0 0 0 1px rgb(var(--accent) / 0.32);
+  color: rgb(var(--accent));
+}
+
+.thoughts-icon-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+/* Persistent status readout in the top-right corner. */
+.thoughts-feed {
+  position: absolute;
+  top: 17px;
+  right: 18px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  color: rgb(var(--ink-rgb) / 0.36);
+  pointer-events: none;
+  user-select: none;
+}
+
+.thoughts-feed-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: rgb(var(--ink-rgb) / 0.3);
+}
+
+.thoughts-feed-dot.is-live {
+  background: rgb(var(--accent));
+  box-shadow: 0 0 8px rgb(var(--accent) / 0.75);
+  animation: thought-pulse 1.6s ease-out infinite;
+}
+
+/* Rolled-up state: the whole window is one glass pill, and the toolbar
+   overlays it instead of taking up its own row. */
+.thoughts-window.is-collapsed .thoughts-card {
+  border-radius: 999px;
+}
+
+.thoughts-window.is-collapsed .thoughts-card::before,
+.thoughts-window.is-collapsed .thoughts-card::after {
+  opacity: 0;
+}
+
+.thoughts-window.is-collapsed .thoughts-toolbar {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  padding: 0 8px;
+}
+
+.thoughts-collapsed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 22px;
+  transition: opacity 0.16s ease;
+}
+
+.thoughts-collapsed::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: rgb(var(--accent));
+  box-shadow: 0 0 8px rgb(var(--accent) / 0.75);
+}
+
+/* While the controls are showing they own the pill; the ticker steps aside. */
+.thoughts-window.is-collapsed:hover .thoughts-collapsed {
+  opacity: 0;
+}
+
+/* One-line ticker that drifts right-to-left while a turn is live. */
+.thoughts-marquee {
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Once thinking stops the drift is gone, so pin the view to the newest text. */
+.thoughts-marquee.is-tail {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.thoughts-marquee.is-tail .thoughts-marquee-track > span {
+  padding-right: 0;
+}
+
+.thoughts-marquee-track {
+  display: flex;
+  width: max-content;
+}
+
+/* Only a live, overflowing text gets the second copy and the drift animation. */
+.thoughts-marquee-track.is-scrolling {
+  animation: thoughts-marquee linear infinite;
+  will-change: transform;
+}
+
+.thoughts-marquee-track > span {
+  padding-right: 4em;
+  font-size: 13px;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  color: rgb(var(--ink-rgb) / 0.82);
+}
+
+@keyframes thoughts-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Appearance popover: skin and window opacity live behind one icon so the
+   pane body stays free of controls. */
+.thoughts-prefs-wrap {
+  position: relative;
+  display: flex;
+}
+
+.thoughts-prefs {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 10;
+  width: 226px;
+  padding: 12px;
+  border: 1px solid rgb(var(--accent) / 0.3);
+  border-radius: 10px;
+  background: rgb(var(--paper-rgb) / 0.97);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+  color: rgb(var(--ink-rgb) / 0.85);
+  font-size: 11px;
+  cursor: default;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.thoughts-prefs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.thoughts-prefs-row + .thoughts-prefs-row {
+  margin-top: 13px;
+}
+
+.thoughts-prefs-label {
+  flex-shrink: 0;
+  width: 3.5em;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: rgb(var(--ink-rgb) / 0.5);
+}
+
+.thoughts-skins {
+  display: flex;
+  gap: 6px;
+}
+
+.thoughts-skin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 4px 5px;
+  border: 1px solid rgb(var(--ink-rgb) / 0.16);
+  border-radius: 999px;
+  background: transparent;
+  color: rgb(var(--ink-rgb) / 0.68);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.thoughts-skin:hover {
+  border-color: rgb(var(--ink-rgb) / 0.32);
+  color: rgb(var(--ink-rgb) / 0.92);
+}
+
+.thoughts-skin.is-selected {
+  border-color: rgb(var(--accent) / 0.65);
+  background: rgb(var(--accent) / 0.1);
+  color: rgb(var(--ink-rgb) / 0.95);
+}
+
+.thoughts-skin-dot {
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgb(var(--ink-rgb) / 0.24);
+  border-radius: 50%;
+}
+
+.thoughts-prefs input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: rgb(var(--accent));
+}
+
+.thoughts-prefs-value {
+  flex-shrink: 0;
+  width: 36px;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--ink-rgb) / 0.55);
+}
+
+.thoughts-viewer {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 18px 56px;
+  /* Keep the viewport anchored while the user reads; new text must not drag it. */
+  overflow-anchor: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--ink-rgb) / 0.25) transparent;
+}
+
+.thoughts-viewer::-webkit-scrollbar {
+  width: 9px;
+}
+
+.thoughts-viewer::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background: rgb(var(--ink-rgb) / 0.2);
+  background-clip: padding-box;
+}
+
+.thoughts-viewer::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink-rgb) / 0.32);
+  background-clip: padding-box;
+}
+
+/* One prompt turn, framed as a HUD log entry rather than a checklist row. */
+.thought-segment {
+  position: relative;
+  margin: 0 0 18px;
+}
+
+.thought-segment + .thought-segment {
+  padding-top: 17px;
+}
+
+/* A short accent rule replaces the full-width divider of a list. */
+.thought-segment + .thought-segment::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 42%;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--accent) / 0.35),
+    rgb(var(--accent) / 0)
+  );
+}
+
+.thought-segment-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.thought-segment-index {
+  flex-shrink: 0;
+  min-width: 27px;
+  padding: 1px 4px;
+  border: 1px solid rgb(var(--accent) / 0.3);
+  border-radius: 4px;
+  background: rgb(var(--accent) / 0.08);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.6;
+  letter-spacing: 0.06em;
+  text-align: center;
+  color: rgb(var(--accent));
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.thought-segment.is-live .thought-segment-index {
+  border-color: rgb(var(--accent) / 0.65);
+  box-shadow: 0 0 12px rgb(var(--accent) / 0.18);
+}
+
+.thought-segment-prompt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  color: rgb(var(--ink-rgb) / 0.72);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s ease;
+}
+
+.thought-segment.is-live .thought-segment-prompt {
+  color: rgb(var(--ink-rgb) / 0.92);
+}
+
+.thought-segment-head:hover .thought-segment-prompt {
+  color: rgb(var(--ink-rgb));
+}
+
+.thought-segment-time {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--ink-rgb) / 0.4);
+}
+
+.thought-segment-live {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: rgb(var(--accent));
+  box-shadow: 0 0 0 0 rgb(var(--accent) / 0.45);
+  animation: thought-pulse 1.6s ease-out infinite;
+}
+
+@keyframes thought-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgb(var(--accent) / 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 5px rgb(var(--accent) / 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--accent) / 0);
+  }
+}
+
+/* Reasoning is prose, not code: a proportional face reads far better here.
+   The hairline rail is the only container chrome around the stream. */
+.thoughts-text {
+  margin: 8px 0 0;
+  padding-left: 12px;
+  border-left: 1px solid rgb(var(--accent) / 0.18);
+  max-width: 74ch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.9;
+  letter-spacing: 0.01em;
+  color: rgb(var(--ink-rgb) / 0.82);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: text;
+}
+
+/* Collapsed body: a one-line ticker pinned to the newest text, so the turn
+   stays readable while the segment occupies a single line. */
+.thought-segment-ticker-row {
+  display: flex;
+  margin-top: 6px;
+  padding-left: 12px;
+  border-left: 1px solid rgb(var(--accent) / 0.18);
+}
+
+.thought-segment-ticker {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: rgb(var(--ink-rgb) / 0.5);
+  white-space: nowrap;
+  transition: color 0.15s ease;
+  pointer-events: none;
+}
+
+.thought-segment-ticker::-webkit-scrollbar {
+  display: none;
+}
+
+/* Per-turn metadata stays quiet until the reader hovers the turn. */
+.thought-segment-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 7px;
+  padding-left: 12px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--ink-rgb) / 0.38);
+  opacity: 0.45;
+  transition: opacity 0.18s ease;
+}
+
+.thought-segment:hover .thought-segment-foot {
+  opacity: 0.9;
+}
+
+.thought-segment-workdir {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thoughts-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.thoughts-empty-kicker {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.24em;
+  color: rgb(var(--accent));
+}
+
+.thoughts-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgb(var(--ink-rgb) / 0.85);
+}
+
+.thoughts-empty-hint {
+  font-size: 12px;
+  color: rgb(var(--ink-rgb) / 0.5);
+}
+
+.thoughts-viewer-empty {
+  padding: 38px 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: rgb(var(--ink-rgb) / 0.42);
+}
+
+.thoughts-viewer-empty::after {
+  content: "▍";
+  margin-left: 6px;
+  color: rgb(var(--accent));
+  animation: thought-blink 1.1s steps(1) infinite;
+}
+
+@keyframes thought-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.thoughts-btn {
+  padding: 6px 14px;
+  border: 1px solid rgb(var(--accent) / 0.45);
+  border-radius: 6px;
+  background: rgb(var(--accent) / 0.08);
+  color: rgb(var(--ink-rgb) / 0.85);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.thoughts-btn:hover {
+  background: rgb(var(--accent) / 0.16);
+  color: rgb(var(--ink-rgb));
+}
+
+.thoughts-follow {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  padding: 6px 13px;
+  border: 1px solid rgb(var(--accent) / 0.45);
+  border-radius: 6px;
+  background: rgb(var(--paper-rgb) / 0.92);
+  color: rgb(var(--accent));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thoughts-marquee-track,
+  .thought-segment-live,
+  .thoughts-feed-dot.is-live,
+  .thoughts-viewer-empty::after {
+    animation: none;
+  }
+}

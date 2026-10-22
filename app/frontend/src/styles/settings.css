@@ -89,3 +89,9 @@
   cursor: pointer;
   font-size: inherit;
 }
+
+.settings-page .settings-hint {
+  color: gray;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}

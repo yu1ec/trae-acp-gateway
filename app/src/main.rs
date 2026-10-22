@@ -12,8 +12,8 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
-    CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir_root,
-    ensure_workdir, is_legacy_workdir, serve, user_home_dir,
+    CURRENT_VERSION, Config as GatewayConfig, ThoughtSink, ThoughtUpdate, canonicalize_workdir,
+    default_workdir_root, ensure_workdir, is_legacy_workdir, serve_with_thoughts, user_home_dir,
 };
 
 mod update;
@@ -71,6 +71,9 @@ struct AppConfig {
     debug: bool,
     autostart: bool,
     auto_check_update: bool,
+    /// Open a floating panel that streams ACP reasoning chunks.
+    #[serde(default)]
+    thought_panel_enabled: bool,
 }
 
 impl AppConfig {
@@ -86,6 +89,7 @@ impl AppConfig {
             debug: false,
             autostart: false,
             auto_check_update: false,
+            thought_panel_enabled: false,
         }
     }
 
@@ -190,6 +194,170 @@ impl LogBuffer {
     }
 }
 
+/// Upper bound for the aggregated reasoning transcript. Large enough for a
+/// long turn, small enough that polling the panel stays cheap.
+const THOUGHT_CAP_BYTES: usize = 200_000;
+
+/// Upper bound on retained segments, so many short turns cannot grow the
+/// snapshot without limit.
+const THOUGHT_MAX_SEGMENTS: usize = 40;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Reasoning produced by one prompt turn. The panel renders each segment as
+/// its own block so turns from different requests stay distinguishable.
+#[derive(Serialize, Clone)]
+struct ThoughtSegment {
+    session_id: String,
+    workdir: String,
+    started_at: u64,
+    ended_at: Option<u64>,
+    /// The user's question for this turn (may be truncated).
+    prompt: String,
+    text: String,
+}
+
+struct ThoughtInner {
+    segments: VecDeque<ThoughtSegment>,
+    version: u64,
+}
+
+/// Aggregated ACP reasoning stream for the desktop thought panel. The sink is
+/// called from gateway worker threads; the panel polls snapshots.
+struct ThoughtBuffer {
+    inner: Mutex<ThoughtInner>,
+    enabled: std::sync::atomic::AtomicBool,
+}
+
+impl ThoughtBuffer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            inner: Mutex::new(ThoughtInner {
+                segments: VecDeque::new(),
+                version: 0,
+            }),
+            enabled: std::sync::atomic::AtomicBool::new(enabled),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    fn push(&self, update: ThoughtUpdate) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let now = now_ms();
+        match update {
+            ThoughtUpdate::Start {
+                session_id,
+                workdir,
+                prompt,
+            } => {
+                let segment = Self::segment_mut(&mut inner, &session_id, &workdir, now);
+                segment.prompt = prompt;
+            }
+            ThoughtUpdate::Delta { session_id, text } => {
+                let segment = Self::segment_mut(&mut inner, &session_id, "", now);
+                segment.text.push_str(&text);
+            }
+            ThoughtUpdate::End { session_id } => {
+                if let Some(segment) = inner
+                    .segments
+                    .iter_mut()
+                    .rev()
+                    .find(|s| s.session_id == session_id && s.ended_at.is_none())
+                {
+                    segment.ended_at = Some(now);
+                }
+            }
+        }
+        Self::trim(&mut inner);
+        inner.version = inner.version.wrapping_add(1);
+    }
+
+    /// Extend the open segment for `session_id`, or open a new one. A finished
+    /// segment is never reopened: the same session id can only start again
+    /// after a fresh `Start`.
+    fn segment_mut<'a>(
+        inner: &'a mut ThoughtInner,
+        session_id: &str,
+        workdir: &str,
+        now: u64,
+    ) -> &'a mut ThoughtSegment {
+        if let Some(index) = inner
+            .segments
+            .iter()
+            .rposition(|s| s.session_id == session_id && s.ended_at.is_none())
+        {
+            return &mut inner.segments[index];
+        }
+        inner.segments.push_back(ThoughtSegment {
+            session_id: session_id.to_string(),
+            workdir: workdir.to_string(),
+            started_at: now,
+            ended_at: None,
+            prompt: String::new(),
+            text: String::new(),
+        });
+        inner.segments.back_mut().unwrap()
+    }
+
+    /// Drop the oldest segments (or trim the oldest text) once the transcript
+    /// exceeds its caps.
+    fn trim(inner: &mut ThoughtInner) {
+        while inner.segments.len() > THOUGHT_MAX_SEGMENTS {
+            inner.segments.pop_front();
+        }
+        let mut total: usize = inner.segments.iter().map(|s| s.text.len()).sum();
+        while total > THOUGHT_CAP_BYTES && inner.segments.len() > 1 {
+            if let Some(removed) = inner.segments.pop_front() {
+                total -= removed.text.len();
+            }
+        }
+        if total > THOUGHT_CAP_BYTES {
+            if let Some(oldest) = inner.segments.front_mut() {
+                let mut cut = total - THOUGHT_CAP_BYTES;
+                while cut < oldest.text.len() && !oldest.text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                if cut < oldest.text.len() {
+                    oldest.text.drain(..cut);
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> ThoughtSnapshot {
+        let inner = self.inner.lock().unwrap();
+        ThoughtSnapshot {
+            segments: inner.segments.iter().cloned().collect(),
+            version: inner.version,
+            enabled: self.enabled.load(Ordering::Relaxed),
+        }
+    }
+
+    fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.segments.clear();
+        inner.version = inner.version.wrapping_add(1);
+    }
+}
+
+#[derive(Serialize)]
+struct ThoughtSnapshot {
+    segments: Vec<ThoughtSegment>,
+    version: u64,
+    enabled: bool,
+}
+
 struct AppState {
     cfg: Mutex<AppConfig>,
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -197,6 +365,7 @@ struct AppState {
     /// gateway instance it was spawned for.
     generation: AtomicU64,
     logs: Arc<LogBuffer>,
+    thoughts: Arc<ThoughtBuffer>,
     log_reload: LogFilterReload,
     tray_status: Mutex<Option<MenuItem<tauri::Wry>>>,
     tray_toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
@@ -274,7 +443,13 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
     }
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
-    let (handle, _port) = serve(Arc::new(gcfg)).await.map_err(|e| e.to_string())?;
+    let sink: ThoughtSink = {
+        let thoughts = state.thoughts.clone();
+        Arc::new(move |update| thoughts.push(update))
+    };
+    let (handle, _port) = serve_with_thoughts(Arc::new(gcfg), Some(sink))
+        .await
+        .map_err(|e| e.to_string())?;
     *state.handle.lock().unwrap() = Some(handle);
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     update_tray(app);
@@ -329,6 +504,46 @@ fn open_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) {
     let _ = win.set_focus();
 }
 
+/// Floating, always-on-top reasoning panel. The window itself is transparent so
+/// the in-page opacity slider can control how much of the desktop shows
+/// through.
+fn open_thoughts_window(app: &AppHandle) {
+    let win = match app.get_webview_window("thoughts") {
+        Some(win) => win,
+        None => {
+            let builder = WebviewWindowBuilder::new(
+                app,
+                "thoughts",
+                WebviewUrl::App("index.html#/thoughts".into()),
+            )
+            .title("Thinking")
+            .inner_size(520.0, 640.0)
+            // The collapsed "rolled up" state is a single pill; the minimum
+            // height has to allow the window to shrink to it.
+            .min_inner_size(320.0, 60.0)
+            .always_on_top(true)
+            .transparent(true)
+            // Fully custom chrome: the page draws its own close/appearance/
+            // roll-up controls at the top-left corner.
+            .decorations(false)
+            // The system window shadow draws a dark rim around the transparent
+            // window; the page provides its own look.
+            .shadow(false)
+            .maximizable(false);
+            match builder.build() {
+                Ok(win) => win,
+                Err(e) => {
+                    tracing::error!("failed to open thoughts window: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    let _ = win.unminimize();
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
 #[tauri::command]
 fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.cfg.lock().unwrap().clone()
@@ -351,6 +566,7 @@ async fn save_config(
     normalize_workdir(&mut cfg);
     cfg.normalize_log_level();
     apply_log_level(&state.log_reload, &cfg.log_level)?;
+    state.thoughts.set_enabled(cfg.thought_panel_enabled);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -450,6 +666,26 @@ fn get_logs(state: State<'_, AppState>) -> Vec<String> {
 #[tauri::command]
 fn clear_logs(state: State<'_, AppState>) {
     state.logs.clear();
+}
+
+#[tauri::command]
+fn get_thoughts(state: State<'_, AppState>) -> ThoughtSnapshot {
+    state.thoughts.snapshot()
+}
+
+#[tauri::command]
+fn clear_thoughts(state: State<'_, AppState>) {
+    state.thoughts.clear();
+}
+
+#[tauri::command]
+fn show_settings_window(app: AppHandle) {
+    open_window(&app, "settings", "Settings", 520.0, 540.0);
+}
+
+#[tauri::command]
+fn show_thoughts_window(app: AppHandle) {
+    open_thoughts_window(&app);
 }
 
 #[tauri::command]
@@ -697,6 +933,10 @@ fn main() {
             get_status,
             get_logs,
             clear_logs,
+            get_thoughts,
+            clear_thoughts,
+            show_settings_window,
+            show_thoughts_window,
             pick_workdir,
             get_app_version,
             get_trae_cli_status,
@@ -709,6 +949,7 @@ fn main() {
             let config_path = data_dir.join("config.json");
             let mut cfg = load_config_from_file(&config_path);
             apply_log_level(&log_reload, &cfg.log_level)?;
+            let thoughts = Arc::new(ThoughtBuffer::new(cfg.thought_panel_enabled));
             let before = cfg.workdir.clone();
             normalize_workdir(&mut cfg);
             if cfg.workdir != before {
@@ -721,6 +962,8 @@ fn main() {
             let status = MenuItem::with_id(app, "status", "Gateway: Stopped", false, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Start Gateway", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Open Settings", true, None::<&str>)?;
+            let thoughts_item =
+                MenuItem::with_id(app, "thoughts", "Open Thoughts", true, None::<&str>)?;
             let logs_item = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
@@ -730,6 +973,7 @@ fn main() {
                     &toggle,
                     &PredefinedMenuItem::separator(app)?,
                     &settings,
+                    &thoughts_item,
                     &logs_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
@@ -763,6 +1007,7 @@ fn main() {
                         });
                     }
                     "settings" => open_window(app, "settings", "Settings", 520.0, 540.0),
+                    "thoughts" => open_thoughts_window(app),
                     "logs" => open_window(app, "logs", "Logs", 720.0, 560.0),
                     "quit" => app.exit(0),
                     _ => {}
@@ -774,6 +1019,7 @@ fn main() {
                 handle: Mutex::new(None),
                 generation: AtomicU64::new(0),
                 logs: logs.clone(),
+                thoughts: thoughts.clone(),
                 log_reload: log_reload.clone(),
                 tray_status: Mutex::new(Some(status)),
                 tray_toggle: Mutex::new(Some(toggle)),
@@ -806,4 +1052,45 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod thought_tests {
+    use super::*;
+
+    #[test]
+    fn segments_are_grouped_by_session_and_end_is_tracked() {
+        let buffer = ThoughtBuffer::new(true);
+        buffer.push(ThoughtUpdate::Start {
+            session_id: "session-a".into(),
+            workdir: "/work/a".into(),
+            prompt: "first question".into(),
+        });
+        buffer.push(ThoughtUpdate::Delta {
+            session_id: "session-a".into(),
+            text: "first".into(),
+        });
+        buffer.push(ThoughtUpdate::Start {
+            session_id: "session-b".into(),
+            workdir: "/work/b".into(),
+            prompt: "second question".into(),
+        });
+        buffer.push(ThoughtUpdate::Delta {
+            session_id: "session-b".into(),
+            text: "second".into(),
+        });
+        buffer.push(ThoughtUpdate::End {
+            session_id: "session-a".into(),
+        });
+
+        let snapshot = buffer.snapshot();
+        assert_eq!(snapshot.segments.len(), 2);
+        assert_eq!(snapshot.segments[0].text, "first");
+        assert_eq!(snapshot.segments[0].workdir, "/work/a");
+        assert_eq!(snapshot.segments[0].prompt, "first question");
+        assert!(snapshot.segments[0].ended_at.is_some());
+        assert_eq!(snapshot.segments[1].text, "second");
+        assert_eq!(snapshot.segments[1].prompt, "second question");
+        assert!(snapshot.segments[1].ended_at.is_none());
+    }
 }

@@ -9,6 +9,7 @@ import {
   listenUpdateProgress,
   openExternalUrl,
   saveConfig,
+  showThoughtsWindow,
   LOG_LEVEL_OPTIONS,
   type AppConfig,
   type LogLevelSetting,
@@ -38,6 +39,7 @@ export default function SettingsPage() {
   const [logLevel, setLogLevel] = useState<LogLevelSetting>("info");
   const [autostart, setAutostart] = useState(false);
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
+  const [thoughtPanelEnabled, setThoughtPanelEnabled] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
@@ -75,6 +77,7 @@ export default function SettingsPage() {
         setLogLevel(cfg.log_level ?? "info");
         setAutostart(cfg.autostart);
         setAutoCheckUpdate(cfg.auto_check_update);
+        setThoughtPanelEnabled(cfg.thought_panel_enabled);
       })
       .catch((e: unknown) => setStatus(`Error: ${e}`));
 
@@ -113,6 +116,7 @@ export default function SettingsPage() {
         log_level: logLevel,
         autostart,
         auto_check_update: autoCheckUpdate,
+        thought_panel_enabled: thoughtPanelEnabled,
       };
       await saveConfig(cfg);
       void refreshTraeCliStatus();
@@ -254,6 +258,30 @@ export default function SettingsPage() {
           />{" "}
           Launch at login
         </label>
+      </div>
+
+      <h2 className="section-title">Thinking panel</h2>
+      <div className="row checks">
+        <label>
+          <input
+            type="checkbox"
+            checked={thoughtPanelEnabled}
+            onChange={(e) => setThoughtPanelEnabled(e.target.checked)}
+          />{" "}
+          启用思考面板
+        </label>
+      </div>
+      <div className="row inline">
+        <button
+          type="button"
+          disabled={!thoughtPanelEnabled}
+          onClick={() => void showThoughtsWindow()}
+        >
+          打开思考面板
+        </button>
+        <span className="settings-hint">
+          悬浮显示 ACP 思考流，可搜索、清除并实时调整透明度
+        </span>
       </div>
 
       <h2 className="section-title">Updates</h2>
