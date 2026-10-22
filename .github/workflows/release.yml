@@ -81,7 +81,12 @@ jobs:
       - name: Install Tauri CLI
         uses: taiki-e/cache-cargo-install-action@v3
         with:
-          tool: tauri-cli@2
+          # Must be a full version. With a partial range like `tauri-cli@2`, the
+          # action's pre-step queries https://crates.io/api/v1/crates/tauri-cli
+          # to resolve the latest version; that request has been failing on
+          # GitHub-hosted Windows runners with "curl: (22) ... error: 403",
+          # aborting the job before the build. A full version skips the lookup.
+          tool: tauri-cli@2.12.4
 
       - uses: tauri-apps/tauri-action@v1
         env:
