@@ -14,7 +14,7 @@ use futures_core::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::acp::Usage;
 use crate::agent::TurnEvent;
@@ -282,10 +282,12 @@ async fn responses_stream(
         .unwrap_or_default();
     let store = state.responses.clone();
     let cfg = state.clone();
-    let (tx, rx) = mpsc::channel(64);
+    // Unbounded: the turn callback is synchronous and cannot await capacity,
+    // and a bounded try_send silently dropped output when the client lagged.
+    let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        let send = |ev: Event| tx.try_send(Ok(ev));
+        let send = |ev: Event| tx.send(Ok(ev));
         let _ = send(
             Event::default().event("response.created").data(
                 json!({
@@ -386,7 +388,7 @@ async fn responses_stream(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]

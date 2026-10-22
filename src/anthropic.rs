@@ -11,7 +11,7 @@ use futures_core::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::AppState;
 use crate::acp::Usage;
@@ -99,15 +99,46 @@ pub fn error_response(message: &str, status_type: &str) -> Value {
 fn stop_reason(acp: &str) -> &'static str {
     match acp {
         "max_tokens" => "max_tokens",
-        _ => "end_turn",
+        "refusal" => "refusal",
+        "end_turn" => "end_turn",
+        // Anthropic has no equivalent for these ACP reasons. `cancelled` and
+        // `max_turn_requests` both mean the turn ended prematurely, so surface
+        // them in the logs instead of silently reporting a clean end_turn.
+        "cancelled" => {
+            tracing::warn!(
+                stop_reason = acp,
+                "agent turn was cancelled; reporting end_turn"
+            );
+            "end_turn"
+        }
+        "max_turn_requests" => {
+            tracing::warn!(
+                stop_reason = acp,
+                "agent hit its max turn request limit; reporting end_turn"
+            );
+            "end_turn"
+        }
+        other => {
+            tracing::warn!(
+                stop_reason = other,
+                "unknown ACP stop reason; reporting end_turn"
+            );
+            "end_turn"
+        }
     }
 }
 
 fn usage_json(usage: Option<&Usage>) -> Value {
     let u = usage.cloned().unwrap_or_default();
+    // Trae's `inputTokens` already includes cached reads, whereas Anthropic's
+    // `input_tokens` excludes them. Split them out so clients (Claude Code's
+    // context/cost display) don't count the cache twice.
+    let cached = u.cached_read_tokens.min(u.input_tokens);
     json!({
-        "input_tokens": u.input_tokens,
+        "input_tokens": u.input_tokens.saturating_sub(cached),
         "output_tokens": u.output_tokens,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached,
     })
 }
 
@@ -124,8 +155,109 @@ fn new_message_id() -> String {
 /// Claude Code expects every thinking block to carry a non-empty signature,
 /// otherwise it cannot round-trip the block. The upstream turn does not produce
 /// one, so hand out a stable placeholder.
-fn thinking_signature(id: &str) -> String {
-    format!("sig_{id}")
+fn thinking_signature(id: &str, index: u32) -> String {
+    format!("sig_{id}_{index}")
+}
+
+fn content_block_start(index: u32, block: Value) -> Value {
+    json!({ "type": "content_block_start", "index": index, "content_block": block })
+}
+
+fn content_block_delta(index: u32, delta: Value) -> Value {
+    json!({ "type": "content_block_delta", "index": index, "delta": delta })
+}
+
+fn content_block_stop(index: u32) -> Value {
+    json!({ "type": "content_block_stop", "index": index })
+}
+
+fn sse_event(payload: Value) -> Event {
+    let name = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    Event::default().event(name).data(payload.to_string())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenBlock {
+    None,
+    Thinking,
+    Text,
+}
+
+/// Tracks the content block currently open on the SSE stream.
+///
+/// Thought and text chunks interleave freely during a multi-step turn. Claude
+/// Code requests the interleaved-thinking beta, so a thought arriving after
+/// text closes the text block and opens a new thinking block instead of being
+/// dropped. Each transition closes the previous block and bumps the index.
+struct BlockWriter {
+    index: u32,
+    open: OpenBlock,
+}
+
+impl BlockWriter {
+    fn new() -> Self {
+        Self {
+            index: 0,
+            open: OpenBlock::None,
+        }
+    }
+
+    /// Close the open block, if any, returning its trailing events.
+    fn close(&mut self, message_id: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        match self.open {
+            OpenBlock::None => return out,
+            OpenBlock::Thinking => out.push(content_block_delta(
+                self.index,
+                json!({
+                    "type": "signature_delta",
+                    "signature": thinking_signature(message_id, self.index),
+                }),
+            )),
+            OpenBlock::Text => {}
+        }
+        out.push(content_block_stop(self.index));
+        self.index += 1;
+        self.open = OpenBlock::None;
+        out
+    }
+
+    fn push_thinking(&mut self, text: &str, message_id: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        if self.open != OpenBlock::Thinking {
+            out.extend(self.close(message_id));
+            out.push(content_block_start(
+                self.index,
+                json!({ "type": "thinking", "thinking": "", "signature": "" }),
+            ));
+            self.open = OpenBlock::Thinking;
+        }
+        out.push(content_block_delta(
+            self.index,
+            json!({ "type": "thinking_delta", "thinking": text }),
+        ));
+        out
+    }
+
+    fn push_text(&mut self, text: &str, message_id: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        if self.open != OpenBlock::Text {
+            out.extend(self.close(message_id));
+            out.push(content_block_start(
+                self.index,
+                json!({ "type": "text", "text": "" }),
+            ));
+            self.open = OpenBlock::Text;
+        }
+        out.push(content_block_delta(
+            self.index,
+            json!({ "type": "text_delta", "text": text }),
+        ));
+        out
+    }
 }
 
 pub fn message_response(
@@ -143,7 +275,7 @@ pub fn message_response(
             content.push(json!({
                 "type": "thinking",
                 "thinking": t,
-                "signature": thinking_signature(id),
+                "signature": thinking_signature(id, 0),
             }));
         }
     }
@@ -265,136 +397,53 @@ async fn messages_stream(
     let id = new_message_id();
     let model = req.model.clone();
     let thinking = req.thinking_enabled();
-    let (tx, rx) = mpsc::channel(64);
+    // Unbounded on purpose: the turn callback is synchronous and cannot await
+    // capacity. A bounded queue + try_send used to abort the whole turn
+    // (killing the agent) whenever the client was briefly slow; one turn's
+    // worth of SSE events is small, so buffering is the better trade.
+    let (tx, rx) = mpsc::unbounded_channel();
     let state = state.clone();
 
     tokio::spawn(async move {
-        // A failed try_send means the client is gone (receiver dropped) or is
-        // too slow; abort the turn so the spawned agent is killed instead of
-        // leaking.
+        // A failed send means the receiver was dropped (client hung up), so
+        // abort the turn and let `kill_on_drop` clean up the agent.
         let send = |ev: Event| -> anyhow::Result<()> {
-            match tx.try_send(Ok(ev)) {
-                Ok(()) => Ok(()),
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    anyhow::bail!("SSE buffer full; aborting turn")
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    anyhow::bail!("client disconnected mid-turn")
-                }
-            }
+            tx.send(Ok(ev))
+                .map_err(|_| anyhow::anyhow!("client disconnected mid-turn"))
         };
-        if send(
-            Event::default().event("message_start").data(
-                json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": model,
-                        "content": [],
-                        "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": { "input_tokens": 0, "output_tokens": 0 },
-                    }
-                })
-                .to_string(),
-            ),
-        )
+        if send(sse_event(json!({
+            "type": "message_start",
+            "message": {
+                "id": id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            }
+        })))
         .is_err()
         {
             return;
         }
 
-        let mut block_index: u32 = 0;
-        let mut thinking_open = false;
-        let mut text_open = false;
+        let mut blocks_out = BlockWriter::new();
 
         let result = http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
-            match ev {
-                TurnEvent::Thought(t) if thinking => {
-                    // 思考块必须在正文之前；正文已开始后到达的思考丢弃，
-                    // 避免发出 Claude Code 无法解析的块顺序。
-                    if text_open {
-                        return Ok(());
-                    }
-                    if !thinking_open {
-                        send(
-                            Event::default().event("content_block_start").data(
-                                json!({
-                                    "type": "content_block_start",
-                                    "index": block_index,
-                                    "content_block": {
-                                        "type": "thinking",
-                                        "thinking": "",
-                                        "signature": ""
-                                    }
-                                })
-                                .to_string(),
-                            ),
-                        )?;
-                        thinking_open = true;
-                    }
-                    send(
-                        Event::default().event("content_block_delta").data(
-                            json!({
-                                "type": "content_block_delta",
-                                "index": block_index,
-                                "delta": { "type": "thinking_delta", "thinking": t }
-                            })
-                            .to_string(),
-                        ),
-                    )?;
-                }
-                TurnEvent::Thought(_) => {}
-                TurnEvent::Message(t) => {
-                    if thinking_open {
-                        send(
-                            Event::default().event("content_block_delta").data(
-                                json!({
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {
-                                        "type": "signature_delta",
-                                        "signature": thinking_signature(&id)
-                                    }
-                                })
-                                .to_string(),
-                            ),
-                        )?;
-                        send(
-                            Event::default().event("content_block_stop").data(
-                                json!({ "type": "content_block_stop", "index": block_index })
-                                    .to_string(),
-                            ),
-                        )?;
-                        thinking_open = false;
-                        block_index += 1;
-                    }
-                    if !text_open {
-                        send(
-                            Event::default().event("content_block_start").data(
-                                json!({
-                                    "type": "content_block_start",
-                                    "index": block_index,
-                                    "content_block": { "type": "text", "text": "" }
-                                })
-                                .to_string(),
-                            ),
-                        )?;
-                        text_open = true;
-                    }
-                    send(
-                        Event::default().event("content_block_delta").data(
-                            json!({
-                                "type": "content_block_delta",
-                                "index": block_index,
-                                "delta": { "type": "text_delta", "text": t }
-                            })
-                            .to_string(),
-                        ),
-                    )?;
-                }
+            let payloads = match ev {
+                TurnEvent::Thought(t) if thinking => blocks_out.push_thinking(t, &id),
+                TurnEvent::Thought(_) => Vec::new(),
+                TurnEvent::Message(t) => blocks_out.push_text(t, &id),
+            };
+            for payload in payloads {
+                send(sse_event(payload))?;
             }
             Ok(())
         })
@@ -402,45 +451,17 @@ async fn messages_stream(
 
         match result {
             Ok((_, outcome)) => {
-                if thinking_open {
-                    let _ = send(
-                        Event::default().event("content_block_delta").data(
-                            json!({
-                                "type": "content_block_delta",
-                                "index": block_index,
-                                "delta": {
-                                    "type": "signature_delta",
-                                    "signature": thinking_signature(&id)
-                                }
-                            })
-                            .to_string(),
-                        ),
-                    );
-                    let _ = send(Event::default().event("content_block_stop").data(
-                        json!({ "type": "content_block_stop", "index": block_index }).to_string(),
-                    ));
-                } else if text_open {
-                    let _ = send(Event::default().event("content_block_stop").data(
-                        json!({ "type": "content_block_stop", "index": block_index }).to_string(),
-                    ));
+                for payload in blocks_out.close(&id) {
+                    let _ = send(sse_event(payload));
                 }
                 let finish = stop_reason(&outcome.stop_reason);
                 let usage = usage_json(outcome.usage.as_ref());
-                let _ = send(
-                    Event::default().event("message_delta").data(
-                        json!({
-                            "type": "message_delta",
-                            "delta": { "stop_reason": finish, "stop_sequence": null },
-                            "usage": usage,
-                        })
-                        .to_string(),
-                    ),
-                );
-                let _ = send(
-                    Event::default()
-                        .event("message_stop")
-                        .data(json!({ "type": "message_stop" }).to_string()),
-                );
+                let _ = send(sse_event(json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": finish, "stop_sequence": null },
+                    "usage": usage,
+                })));
+                let _ = send(sse_event(json!({ "type": "message_stop" })));
             }
             Err(e) => {
                 if tx.is_closed() {
@@ -459,7 +480,7 @@ async fn messages_stream(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]
@@ -532,5 +553,103 @@ mod tests {
         .unwrap();
         let blocks = req.to_prompt_blocks();
         assert!(!blocks.is_empty());
+    }
+
+    #[test]
+    fn maps_stop_reasons_to_anthropic_values() {
+        assert_eq!(stop_reason("max_tokens"), "max_tokens");
+        assert_eq!(stop_reason("refusal"), "refusal");
+        assert_eq!(stop_reason("end_turn"), "end_turn");
+        assert_eq!(stop_reason("cancelled"), "end_turn");
+        assert_eq!(stop_reason("max_turn_requests"), "end_turn");
+        assert_eq!(stop_reason("something_new"), "end_turn");
+    }
+
+    #[test]
+    fn usage_splits_cached_tokens_out_of_input() {
+        let usage = Usage {
+            total_tokens: 21_372,
+            input_tokens: 21_330,
+            output_tokens: 42,
+            thought_tokens: 10,
+            cached_read_tokens: 7,
+        };
+        let usage = usage_json(Some(&usage));
+        assert_eq!(usage["input_tokens"], 21_323);
+        assert_eq!(usage["output_tokens"], 42);
+        assert_eq!(usage["cache_read_input_tokens"], 7);
+        assert_eq!(usage["cache_creation_input_tokens"], 0);
+    }
+
+    #[test]
+    fn usage_without_agent_numbers_is_zeroed() {
+        let usage = usage_json(None);
+        assert_eq!(usage["input_tokens"], 0);
+        assert_eq!(usage["output_tokens"], 0);
+        assert_eq!(usage["cache_read_input_tokens"], 0);
+        assert_eq!(usage["cache_creation_input_tokens"], 0);
+    }
+
+    #[test]
+    fn interleaved_thoughts_open_new_blocks() {
+        let mut writer = BlockWriter::new();
+        let mut events = Vec::new();
+        events.extend(writer.push_thinking("a", "msg_1"));
+        events.extend(writer.push_text("b", "msg_1"));
+        events.extend(writer.push_thinking("c", "msg_1"));
+        events.extend(writer.push_text("d", "msg_1"));
+        events.extend(writer.close("msg_1"));
+
+        let shape: Vec<(&str, u64)> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["type"].as_str().unwrap(),
+                    e["index"].as_u64().unwrap_or(0),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("content_block_start", 0),
+                ("content_block_delta", 0), // thinking_delta
+                ("content_block_delta", 0), // signature_delta
+                ("content_block_stop", 0),
+                ("content_block_start", 1),
+                ("content_block_delta", 1), // text_delta
+                ("content_block_stop", 1),
+                ("content_block_start", 2),
+                ("content_block_delta", 2), // thinking_delta
+                ("content_block_delta", 2), // signature_delta
+                ("content_block_stop", 2),
+                ("content_block_start", 3),
+                ("content_block_delta", 3), // text_delta
+                ("content_block_stop", 3),
+            ]
+        );
+
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter(|e| e["type"] == "content_block_delta")
+            .map(|e| e["delta"]["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            deltas,
+            [
+                "thinking_delta",
+                "signature_delta",
+                "text_delta",
+                "thinking_delta",
+                "signature_delta",
+                "text_delta"
+            ]
+        );
+    }
+
+    #[test]
+    fn close_is_a_noop_when_nothing_is_open() {
+        let mut writer = BlockWriter::new();
+        assert!(writer.close("msg_1").is_empty());
     }
 }

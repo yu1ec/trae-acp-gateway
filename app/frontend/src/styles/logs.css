@@ -14,6 +14,22 @@
   flex-shrink: 0;
 }
 
+.log-clear-btn {
+  font: 11px ui-monospace, Menlo, Consolas, monospace;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  cursor: pointer;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.log-clear-btn:hover {
+  background: rgba(229, 72, 77, 0.12);
+  border-color: rgba(229, 72, 77, 0.45);
+  color: #e5484d;
+}
+
 .log-search {
   flex: 1;
   min-width: 140px;

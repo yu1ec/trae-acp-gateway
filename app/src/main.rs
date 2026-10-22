@@ -183,6 +183,11 @@ impl LogBuffer {
     fn snapshot(&self) -> Vec<String> {
         self.lines.lock().unwrap().iter().cloned().collect()
     }
+
+    fn clear(&self) {
+        self.partial.lock().unwrap().clear();
+        self.lines.lock().unwrap().clear();
+    }
 }
 
 struct AppState {
@@ -443,6 +448,11 @@ fn get_logs(state: State<'_, AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
+fn clear_logs(state: State<'_, AppState>) {
+    state.logs.clear();
+}
+
+#[tauri::command]
 async fn pick_workdir(app: AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
         Ok(app
@@ -686,6 +696,7 @@ fn main() {
             stop_gateway,
             get_status,
             get_logs,
+            clear_logs,
             pick_workdir,
             get_app_version,
             get_trae_cli_status,

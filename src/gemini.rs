@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::AppState;
 use crate::acp::Usage;
@@ -254,10 +254,12 @@ pub async fn stream_generate_content(
         ));
     }
 
-    let (tx, rx) = mpsc::channel(64);
+    // Unbounded: the turn callback is synchronous and cannot await capacity,
+    // and a bounded try_send silently dropped output when the client lagged.
+    let (tx, rx) = mpsc::unbounded_channel();
     let cfg = state.clone();
     tokio::spawn(async move {
-        let send = |data: Value| tx.try_send(Ok(Event::default().data(data.to_string())));
+        let send = |data: Value| tx.send(Ok(Event::default().data(data.to_string())));
         let result = http::run_turn_with_callback(cfg.as_ref(), &workdir, &blocks, &mut |ev| {
             match ev {
                 TurnEvent::Thought(t) => {
@@ -276,7 +278,7 @@ pub async fn stream_generate_content(
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]

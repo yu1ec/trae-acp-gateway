@@ -9,7 +9,7 @@ use futures_core::Stream;
 use serde_json::Value;
 use std::convert::Infallible;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::AppState;
 use crate::agent::{AgentProcess, Policy, TurnEvent};
@@ -144,7 +144,10 @@ pub async fn chat_completions(
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
     let completion_id = new_completion_id();
 
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
+    // Unbounded on purpose: the turn callback is synchronous, so it cannot
+    // await capacity. A bounded queue + try_send aborted the whole turn
+    // whenever the client was briefly slow.
+    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let cfg = state.clone();
     tokio::spawn(async move {
         let result = async {
@@ -158,13 +161,11 @@ pub async fn chat_completions(
                     )
                     .to_string(),
                 )))
-                .await
                 .is_ok();
             if !opened {
                 anyhow::bail!("client disconnected before first delta");
             }
 
-            let tx = tx.clone();
             let completion_id = completion_id.clone();
             let mut client_gone = false;
             let turn = run_turn_with_callback(&cfg, &workdir, &blocks, &mut |ev| {
@@ -182,13 +183,9 @@ pub async fn chat_completions(
                         None,
                     ),
                 };
-                match tx.try_send(Ok(Event::default().data(ev.to_string()))) {
+                match tx.send(Ok(Event::default().data(ev.to_string()))) {
                     Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        client_gone = true;
-                        anyhow::bail!("SSE buffer full; aborting turn")
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(_) => {
                         client_gone = true;
                         anyhow::bail!("client disconnected mid-turn")
                     }
@@ -204,31 +201,27 @@ pub async fn chat_completions(
 
         match result {
             Ok((_, outcome)) => {
-                let _ = tx
-                    .send(Ok(Event::default().data(
-                        chat_chunk(
-                            &completion_id,
-                            serde_json::json!({}),
-                            Some(finish_reason(&outcome.stop_reason)),
-                            outcome.usage.as_ref(),
-                        )
-                        .to_string(),
-                    )))
-                    .await;
-                let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+                let _ = tx.send(Ok(Event::default().data(
+                    chat_chunk(
+                        &completion_id,
+                        serde_json::json!({}),
+                        Some(finish_reason(&outcome.stop_reason)),
+                        outcome.usage.as_ref(),
+                    )
+                    .to_string(),
+                )));
+                let _ = tx.send(Ok(Event::default().data("[DONE]")));
             }
             Err(e) => {
                 tracing::error!(error = %e, "turn failed");
-                let _ = tx
-                    .send(Ok(Event::default()
-                        .event("error")
-                        .data(error_response(&e.to_string(), 500).to_string())))
-                    .await;
+                let _ = tx.send(Ok(Event::default()
+                    .event("error")
+                    .data(error_response(&e.to_string(), 500).to_string())));
             }
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
 }
 
 pub async fn chat_completions_buffered(

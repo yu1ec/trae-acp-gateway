@@ -11,7 +11,10 @@ export default function LogsPage() {
   const [paused, setPaused] = useState(false);
   const [search, setSearch] = useState("");
   const [levels, setLevels] = useState<Set<LogLevel>>(defaultLevels);
-  const { lines, pending, clearPending } = useLogs(paused);
+  const [expandedJsonIds, setExpandedJsonIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const { lines, pending, clearPending, clear } = useLogs(paused);
   const viewerRef = useRef<HTMLDivElement>(null);
   // Scroll events can fire while new lines are appended (browser scroll
   // anchoring), so read the latest pause state synchronously instead of the
@@ -58,6 +61,23 @@ export default function LogsPage() {
     if (!atBottom()) setPaused(true);
   };
 
+  const handleToggleJson = useCallback((id: number, opening: boolean) => {
+    setExpandedJsonIds((prev) => {
+      const next = new Set(prev);
+      if (opening) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+    if (opening) {
+      setPaused(true);
+    }
+  }, []);
+
+  const handleClear = useCallback(() => {
+    void clear();
+    setExpandedJsonIds(new Set());
+  }, [clear]);
+
   const toggleLevel = (level: LogLevel) => {
     setLevels((prev) => {
       const next = new Set(prev);
@@ -74,11 +94,14 @@ export default function LogsPage() {
         onSearchChange={setSearch}
         levels={levels}
         onToggleLevel={toggleLevel}
+        onClear={handleClear}
       />
       <LogViewer
         ref={viewerRef}
         lines={visibleLines}
         search={search}
+        expandedJsonIds={expandedJsonIds}
+        onToggleJson={handleToggleJson}
         onScroll={handleScroll}
       />
       <button

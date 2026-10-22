@@ -64,6 +64,10 @@ export function getLogs(): Promise<string[]> {
   return invoke<string[]>("get_logs");
 }
 
+export function clearLogs(): Promise<void> {
+  return invoke<void>("clear_logs");
+}
+
 export function getAppVersion(): Promise<string> {
   return invoke<string>("get_app_version");
 }

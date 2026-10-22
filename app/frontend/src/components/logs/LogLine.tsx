@@ -1,9 +1,11 @@
-import { useState } from "react";
-import { splitHighlight, type ParsedLogLine } from "../../lib/logParse";
+import { splitHighlight } from "../../lib/logParse";
+import type { StoredLogLine } from "../../hooks/useLogs";
 
 interface LogLineProps {
-  line: ParsedLogLine;
+  line: StoredLogLine;
   search: string;
+  jsonOpen: boolean;
+  onToggleJson: (opening: boolean) => void;
 }
 
 /** One-line summary of the pretty JSON shown while the block is collapsed. */
@@ -27,9 +29,13 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
   );
 }
 
-export default function LogLine({ line, search }: LogLineProps) {
+export default function LogLine({
+  line,
+  search,
+  jsonOpen,
+  onToggleJson,
+}: LogLineProps) {
   const isErr = line.level === "ERROR" || line.level === "FATAL";
-  const [jsonOpen, setJsonOpen] = useState(false);
 
   if (!line.level || !line.timestamp) {
     return (
@@ -38,6 +44,11 @@ export default function LogLine({ line, search }: LogLineProps) {
       </div>
     );
   }
+
+  const handleJsonToggle = () => {
+    const opening = !jsonOpen;
+    onToggleJson(opening);
+  };
 
   return (
     <div className={`log-line${isErr ? " err" : ""}`}>
@@ -51,7 +62,7 @@ export default function LogLine({ line, search }: LogLineProps) {
             className="log-json-toggle"
             aria-expanded={jsonOpen}
             title={jsonOpen ? "Collapse JSON" : "Expand JSON"}
-            onClick={() => setJsonOpen((open) => !open)}
+            onClick={handleJsonToggle}
           >
             <span className="log-json-caret">{jsonOpen ? "▾" : "▸"}</span>
             {jsonOpen ? (

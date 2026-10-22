@@ -5,6 +5,7 @@ interface LogToolbarProps {
   onSearchChange: (value: string) => void;
   levels: Set<LogLevel>;
   onToggleLevel: (level: LogLevel) => void;
+  onClear: () => void;
 }
 
 export default function LogToolbar({
@@ -12,6 +13,7 @@ export default function LogToolbar({
   onSearchChange,
   levels,
   onToggleLevel,
+  onClear,
 }: LogToolbarProps) {
   return (
     <div className="log-toolbar">
@@ -22,6 +24,9 @@ export default function LogToolbar({
         value={search}
         onChange={(e) => onSearchChange(e.target.value)}
       />
+      <button type="button" className="log-clear-btn" onClick={onClear}>
+        Clear
+      </button>
       <div className="level-filters">
         {LOG_LEVELS.map((level) => (
           <button
