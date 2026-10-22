@@ -116,7 +116,7 @@ target/release/trae_acp_gateway
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--port` | `60111` | 监听端口（仅 localhost）；被占用时启动直接失败并报错，不会自动切换端口 |
-| `--workdir` | `~/trae-acp-gateway` | 客户端未上报 workdir 时使用的默认 Agent 工作目录（不存在时自动创建） |
+| `--workdir` | 网关进程当前目录 | 客户端未上报 workdir 时使用的 Agent 工作目录（未配置时使用网关自己的 cwd） |
 | `--allowed-workdir-root` | `$HOME` | 允许客户端上报的 workdir 根目录；上报路径规范化后必须位于其下 |
 | `--trae-cmd` | `traecli` | Agent 可执行文件 |
 | `--trae-args` | `acp,serve` | 传给 Agent 的参数（逗号分隔） |
@@ -133,10 +133,10 @@ target/release/trae_acp_gateway
 2. 请求体字段：OpenAI `workdir`、Responses `workdir` / `metadata.workdir`
 3. Claude Code 注入的 `# Environment` 块中的 `- Primary working directory: ...`
 4. system prompt 中的 `Working directory: ...`
-5. `--workdir` 配置值
+5. `--workdir` 配置值；未配置时使用网关进程的当前目录
 
 上报路径必须是已存在的绝对目录，且规范化（解析符号链接）后位于 `--allowed-workdir-root` 下；
-不满足时显式来源返回 400，自动解析来源则回退到配置值。解析结果及来源会以 `debug` 级别记录。
+不满足时显式来源返回 400，自动解析来源则回退到 `--workdir`（未配置时为网关进程当前目录）。解析结果及来源会以 `debug` 级别记录。
 
 ```jsonc
 // <project>/.claude/settings.json

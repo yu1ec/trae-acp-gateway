@@ -68,7 +68,7 @@ export default function SettingsPage() {
     getConfig()
       .then((cfg) => {
         setPort(cfg.port);
-        workdirRef.current = cfg.workdir;
+        workdirRef.current = cfg.workdir ?? "";
         setTraeCmd(cfg.trae_cmd);
         setTraeArgs(cfg.trae_args.join(", "));
         setSandbox(cfg.sandbox);

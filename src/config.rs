@@ -5,30 +5,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, bail};
 use clap::Parser;
 
-/// Subdirectory under the user home used as the default agent workdir.
-pub const DEFAULT_WORKDIR_NAME: &str = "trae-acp-gateway";
-
 /// User home directory (`HOME` on Unix, `USERPROFILE` on Windows).
 pub fn user_home_dir() -> Option<String> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var(key).ok()
 }
 
-/// Default agent workdir: `~/trae-acp-gateway` (or `%USERPROFILE%\\trae-acp-gateway`), or `.` if home is unknown.
-pub fn default_workdir() -> String {
-    user_home_dir()
-        .map(|home| {
-            PathBuf::from(home)
-                .join(DEFAULT_WORKDIR_NAME)
-                .display()
-                .to_string()
-        })
-        .unwrap_or_else(|| ".".into())
-}
-
-/// Values that should be replaced with [`default_workdir`] (legacy / unset).
+/// Values that mean "no workdir configured".
 pub fn is_legacy_workdir(workdir: &str) -> bool {
-    matches!(workdir.trim(), "" | "." | "./" | "~")
+    matches!(workdir.trim(), "" | "." | "./")
 }
 
 /// Create the workdir tree if missing (`~` is expanded first).
@@ -150,7 +135,7 @@ pub fn agent_path_env() -> Option<String> {
 /// Expand `~` / `~/…` before canonicalization (GUI and CLI share this).
 pub fn expand_workdir(workdir: &str) -> String {
     if workdir == "~" {
-        return default_workdir();
+        return user_home_dir().unwrap_or_else(|| ".".into());
     }
     if let Some(rest) = workdir.strip_prefix("~/") {
         if let Some(home) = user_home_dir() {
@@ -376,8 +361,9 @@ pub struct Config {
     #[arg(long, default_value_t = 60111)]
     pub port: u16,
 
-    /// Working directory handed to the agent when the client does not report one.
-    #[arg(long, default_value_t = default_workdir())]
+    /// Working directory handed to the agent when the client does not report
+    /// one. Defaults to the gateway process's current directory.
+    #[arg(long, default_value = "")]
     pub workdir: String,
 
     /// Only client-reported workdirs under this directory are accepted.

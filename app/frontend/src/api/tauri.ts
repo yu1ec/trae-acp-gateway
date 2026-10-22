@@ -15,7 +15,7 @@ export const LOG_LEVEL_OPTIONS: { value: LogLevelSetting; label: string }[] = [
 
 export interface AppConfig {
   port: number;
-  workdir: string;
+  workdir?: string;
   trae_cmd: string;
   trae_args: string[];
   sandbox: boolean;

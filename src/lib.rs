@@ -16,9 +16,9 @@ use anyhow::Context as _;
 use axum::Router;
 use axum::routing::{get, post};
 pub use config::{
-    Cli, Commands, Config, DEFAULT_WORKDIR_NAME, ResolvedWorkdir, UpdateAction, WORKDIR_HEADER,
-    WorkdirSource, default_workdir, default_workdir_root, ensure_workdir, expand_workdir,
-    is_legacy_workdir, resolve_request_workdir, user_home_dir, workdir_from_environment_context,
+    Cli, Commands, Config, ResolvedWorkdir, UpdateAction, WORKDIR_HEADER, WorkdirSource,
+    default_workdir_root, ensure_workdir, expand_workdir, is_legacy_workdir,
+    resolve_request_workdir, user_home_dir, workdir_from_environment_context,
     workdir_from_system_prompt,
 };
 pub use openai_responses::{GatewayState, ResponseStore};
@@ -79,8 +79,17 @@ pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<(tokio::task::JoinHandle<
 }
 
 /// ACP agents reject relative cwd (`session/new`: -32602), so normalize once.
+/// An unset workdir falls back to the gateway process's current directory.
 pub fn canonicalize_workdir(cfg: &mut Config) -> anyhow::Result<()> {
-    let expanded = expand_workdir(&cfg.workdir);
+    let configured = cfg.workdir.trim();
+    let expanded = if configured.is_empty() {
+        std::env::current_dir()
+            .context("resolving current directory")?
+            .display()
+            .to_string()
+    } else {
+        expand_workdir(configured)
+    };
     std::fs::create_dir_all(&expanded).with_context(|| format!("creating workdir `{expanded}`"))?;
     cfg.workdir = std::fs::canonicalize(&expanded)
         .with_context(|| format!("resolving workdir `{expanded}`"))?

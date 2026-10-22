@@ -12,8 +12,8 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
-    CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir,
-    default_workdir_root, ensure_workdir, is_legacy_workdir, serve,
+    CURRENT_VERSION, Config as GatewayConfig, canonicalize_workdir, default_workdir_root,
+    ensure_workdir, is_legacy_workdir, serve, user_home_dir,
 };
 
 mod update;
@@ -54,6 +54,8 @@ fn apply_log_level(reload: &LogFilterReload, level: &str) -> Result<(), String> 
 #[serde(default)]
 struct AppConfig {
     port: u16,
+    /// Empty means "not configured": requests fall back to the gateway's cwd.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     workdir: String,
     /// Client-reported workdirs must stay under this root.
     #[serde(default = "default_workdir_root")]
@@ -75,7 +77,7 @@ impl AppConfig {
     fn defaults() -> Self {
         Self {
             port: 60111,
-            workdir: default_workdir(),
+            workdir: String::new(),
             allowed_workdir_root: default_workdir_root(),
             trae_cmd: "traecli".into(),
             trae_args: vec!["acp".into(), "serve".into()],
@@ -107,9 +109,18 @@ fn load_config_from_file(path: &std::path::Path) -> AppConfig {
     cfg
 }
 
+/// Path that older versions wrote as the implicit default.
+fn is_old_default_workdir(workdir: &str) -> bool {
+    user_home_dir().is_some_and(|home| {
+        std::path::Path::new(workdir.trim())
+            == std::path::Path::new(&home).join("trae-acp-gateway")
+    })
+}
+
 fn normalize_workdir(cfg: &mut AppConfig) {
-    if is_legacy_workdir(&cfg.workdir) {
-        cfg.workdir = default_workdir();
+    if is_legacy_workdir(&cfg.workdir) || is_old_default_workdir(&cfg.workdir) {
+        cfg.workdir.clear();
+        return;
     }
     if let Err(e) = ensure_workdir(&cfg.workdir) {
         tracing::warn!("failed to create workdir `{}`: {e}", cfg.workdir);
