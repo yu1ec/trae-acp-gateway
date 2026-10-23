@@ -202,6 +202,15 @@ const THOUGHT_CAP_BYTES: usize = 200_000;
 /// snapshot without limit.
 const THOUGHT_MAX_SEGMENTS: usize = 40;
 
+/// Coalescing window for thought events. ACP delivers many small chunks per
+/// second; collapsing them keeps the webview repainting at roughly 25 fps
+/// instead of re-serialising a full snapshot on every chunk.
+const THOUGHT_EVENT_COALESCE: Duration = Duration::from_millis(40);
+
+/// Event name the panel listens on. The payload is empty: the listener fetches
+/// the snapshot once per frame, so no per-chunk text crosses the IPC boundary.
+const THOUGHT_EVENT: &str = "thoughts-updated";
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -221,6 +230,10 @@ struct ThoughtSegment {
     workdir: String,
     started_at: u64,
     ended_at: Option<u64>,
+    /// Last time this turn produced output. The panel focuses the live turn
+    /// that wrote most recently, so concurrent requests never compete for the
+    /// same screen position.
+    updated_at: u64,
     /// The user's question for this turn (may be truncated).
     prompt: String,
     text: String,
@@ -236,6 +249,9 @@ struct ThoughtInner {
 struct ThoughtBuffer {
     inner: Mutex<ThoughtInner>,
     enabled: std::sync::atomic::AtomicBool,
+    /// Signals the emitter thread that the transcript changed. `None` until the
+    /// app attaches its event channel.
+    notify: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl ThoughtBuffer {
@@ -246,6 +262,7 @@ impl ThoughtBuffer {
                 version: 0,
             }),
             enabled: std::sync::atomic::AtomicBool::new(enabled),
+            notify: Mutex::new(None),
         }
     }
 
@@ -253,40 +270,68 @@ impl ThoughtBuffer {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
 
+    /// Forward transcript changes to the webview. Pushes only signal this
+    /// thread; it coalesces bursts and emits one empty event, so a streaming
+    /// turn costs one repaint per window rather than one IPC call per chunk.
+    fn attach_events(&self, app: AppHandle) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.notify.lock().unwrap() = Some(tx);
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                std::thread::sleep(THOUGHT_EVENT_COALESCE);
+                while rx.try_recv().is_ok() {}
+                if let Err(e) = app.emit(THOUGHT_EVENT, ()) {
+                    tracing::debug!("failed to emit thought event: {e}");
+                }
+            }
+        });
+    }
+
+    /// Wake the emitter without blocking the ACP turn loop.
+    fn wake(&self) {
+        if let Some(tx) = self.notify.lock().unwrap().as_ref() {
+            let _ = tx.send(());
+        }
+    }
+
     fn push(&self, update: ThoughtUpdate) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        let mut inner = self.inner.lock().unwrap();
-        let now = now_ms();
-        match update {
-            ThoughtUpdate::Start {
-                session_id,
-                client_session,
-                workdir,
-                prompt,
-            } => {
-                let segment = Self::segment_mut(&mut inner, &session_id, &workdir, now);
-                segment.client_session = client_session;
-                segment.prompt = prompt;
-            }
-            ThoughtUpdate::Delta { session_id, text } => {
-                let segment = Self::segment_mut(&mut inner, &session_id, "", now);
-                segment.text.push_str(&text);
-            }
-            ThoughtUpdate::End { session_id } => {
-                if let Some(segment) = inner
-                    .segments
-                    .iter_mut()
-                    .rev()
-                    .find(|s| s.session_id == session_id && s.ended_at.is_none())
-                {
-                    segment.ended_at = Some(now);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let now = now_ms();
+            match update {
+                ThoughtUpdate::Start {
+                    session_id,
+                    client_session,
+                    workdir,
+                    prompt,
+                } => {
+                    let segment = Self::segment_mut(&mut inner, &session_id, &workdir, now);
+                    segment.client_session = client_session;
+                    segment.prompt = prompt;
+                }
+                ThoughtUpdate::Delta { session_id, text } => {
+                    let segment = Self::segment_mut(&mut inner, &session_id, "", now);
+                    segment.text.push_str(&text);
+                }
+                ThoughtUpdate::End { session_id } => {
+                    if let Some(segment) = inner
+                        .segments
+                        .iter_mut()
+                        .rev()
+                        .find(|s| s.session_id == session_id && s.ended_at.is_none())
+                    {
+                        segment.ended_at = Some(now);
+                        segment.updated_at = now;
+                    }
                 }
             }
+            Self::trim(&mut inner);
+            inner.version = inner.version.wrapping_add(1);
         }
-        Self::trim(&mut inner);
-        inner.version = inner.version.wrapping_add(1);
+        self.wake();
     }
 
     /// Extend the open segment for `session_id`, or open a new one. A finished
@@ -303,7 +348,9 @@ impl ThoughtBuffer {
             .iter()
             .rposition(|s| s.session_id == session_id && s.ended_at.is_none())
         {
-            return &mut inner.segments[index];
+            let segment = &mut inner.segments[index];
+            segment.updated_at = now;
+            return segment;
         }
         inner.segments.push_back(ThoughtSegment {
             session_id: session_id.to_string(),
@@ -311,6 +358,7 @@ impl ThoughtBuffer {
             workdir: workdir.to_string(),
             started_at: now,
             ended_at: None,
+            updated_at: now,
             prompt: String::new(),
             text: String::new(),
         });
@@ -352,9 +400,12 @@ impl ThoughtBuffer {
     }
 
     fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.segments.clear();
-        inner.version = inner.version.wrapping_add(1);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.segments.clear();
+            inner.version = inner.version.wrapping_add(1);
+        }
+        self.wake();
     }
 }
 
@@ -1032,6 +1083,7 @@ fn main() {
             let mut cfg = load_config_from_file(&config_path);
             apply_log_level(&log_reload, &cfg.log_level)?;
             let thoughts = Arc::new(ThoughtBuffer::new(cfg.thought_panel_enabled));
+            thoughts.attach_events(app.handle().clone());
             let before = cfg.workdir.clone();
             normalize_workdir(&mut cfg);
             if cfg.workdir != before {

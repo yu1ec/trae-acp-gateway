@@ -14,7 +14,6 @@ import {
   closeCurrentWindow,
   getWindowScaleFactor,
   getWindowSize,
-  isWindowAlwaysOnTop,
   openExternalUrl,
   setWindowAlwaysOnTop,
   setWindowLogicalSize,
@@ -23,11 +22,13 @@ import {
   type ThoughtSegment,
 } from "../api/tauri";
 import { useThoughts } from "../hooks/useThoughts";
+import { useEdgeHide } from "../hooks/useEdgeHide";
 import "../styles/thoughts.css";
 
 const OPACITY_KEY = "trae-thoughts-opacity";
 const PINNED_KEY = "trae-thoughts-pinned";
 const EXPANDED_SIZE_KEY = "trae-thoughts-expanded-size";
+const HIDE_SHORT_KEY = "trae-thoughts-hide-short";
 const DEFAULT_OPACITY = 0.82;
 // The rolled-up state is a single pill; keep the logical window height in sync
 // so the transparent area does not cover the desktop behind it.
@@ -35,6 +36,18 @@ const COLLAPSED_HEIGHT = 60;
 // Collapsed segments render a one-line ticker; only the tail can be visible,
 // so keeping the last few hundred characters bounds the DOM for long turns.
 const TICKER_CHARS = 400;
+// Auxiliary gateway requests (title generation, summaries) finish quickly and
+// think briefly. The protocol has no request type, so flag them heuristically
+// and let the user hide them.
+const SHORT_TURN_CHARS = 600;
+const SHORT_TURN_MS = 6000;
+// Once a turn owns the focus, let it keep it until it has been quiet for a
+// moment; concurrent requests often write in the same window and swapping on
+// every snapshot would make the panel flicker.
+const FOCUS_HOLD_MS = 1200;
+// The one open segment is the scroll anchor: new text always grows here, so
+// the viewport never chases output that appears in a different block.
+const FOCUS_SELECTOR = '[data-focus-segment="true"]';
 
 function loadOpacity(): number {
   try {
@@ -84,6 +97,14 @@ function saveExpandedSize(size: TauriWindowSize) {
   }
 }
 
+function loadHideShort(): boolean {
+  try {
+    return localStorage.getItem(HIDE_SHORT_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 function formatClock(ms: number): string {
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "";
@@ -116,10 +137,12 @@ function basename(path: string): string {
 // identify the conversation. The client's own session id does; give each one a
 // stable colour so interleaved turns stay attributable at a glance.
 const SESSION_HUES = [152, 193, 39, 275, 340, 218];
-// The group header shows the project folder and the opening question; ids stay
-// in the tooltip because nobody recognises a hex string.
-const PROMPT_HINT_CHARS = 18;
-const LIVE_GROUP_SELECTOR = '[data-live-group="true"]';
+// The group header reads as "project · opening summary"; it needs enough room
+// to describe how the conversation started, but still fits on one row.
+const PROMPT_HINT_CHARS = 56;
+// A turn that only carried screenshots has no textual opening; skip it when
+// picking the summary instead of labelling the group "[Image #1]".
+const IMAGE_MARKER = /\[image #\d+\]/gi;
 
 function sessionHue(key: string): number {
   let hash = 0;
@@ -143,14 +166,15 @@ interface ThoughtGroup {
   startedAt: number;
   lastActivity: number;
   live: boolean;
-  firstPrompt: string;
 }
 
 interface GroupMeta {
   /** Human name: the project folder, disambiguated only when it must be. */
   name: string;
-  /** Opening question of the conversation, truncated for the group header. */
+  /** Opening-content summary of the conversation, truncated for the header. */
   hint: string;
+  /** Untruncated opening, shown in the tooltip. */
+  opening: string;
   hue: number;
 }
 
@@ -167,7 +191,6 @@ function groupThoughts(segments: ThoughtSegment[]): ThoughtGroup[] {
         startedAt: segment.started_at,
         lastActivity: segment.ended_at ?? segment.started_at,
         live: false,
-        firstPrompt: "",
       };
       groups.set(key, group);
     }
@@ -178,9 +201,6 @@ function groupThoughts(segments: ThoughtSegment[]): ThoughtGroup[] {
       segment.ended_at ?? segment.started_at,
     );
     group.live = group.live || segment.ended_at == null;
-    if (!group.firstPrompt && segment.prompt.trim()) {
-      group.firstPrompt = segment.prompt;
-    }
   }
 
   // Live conversations first, then most recent activity, so the session the
@@ -192,22 +212,95 @@ function groupThoughts(segments: ThoughtSegment[]): ThoughtGroup[] {
 }
 
 function promptHint(prompt: string): string {
-  const line = prompt.trim().replace(/\s+/g, " ");
+  const line = prompt
+    .replace(IMAGE_MARKER, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!line) return "";
   return line.length > PROMPT_HINT_CHARS
     ? `${line.slice(0, PROMPT_HINT_CHARS)}…`
     : line;
 }
 
+/** Strip the protocol wrappers clients put around a prompt (e.g. `<session>`),
+ *  so the row shows the question rather than the envelope. */
+function displayPrompt(prompt: string): string {
+  // Strip invisible padding (BOM, zero-width) first: it defeats the `^` anchor
+  // and leaves the envelope visibly intact.
+  const trimmed = prompt
+    .replace(/[\uFEFF\u200B-\u200D\u2060]/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+  const bare = trimmed
+    .replace(/^(?:<[^>]+>\s*)+/, "")
+    .replace(/(?:\s*<\/[^>]+>)+$/, "")
+    .trim();
+  return bare || trimmed;
+}
+
+/** Hosts prepend environment and reminder material to the first turn. It
+ *  describes the machine rather than the conversation, so it must not become
+ *  the group's summary. */
+function isInjectedPrompt(text: string): boolean {
+  const t = text.trimStart();
+  return (
+    t.startsWith("# Environment") ||
+    t.startsWith("<environment") ||
+    t.startsWith("<system-reminder>") ||
+    t.startsWith("You have been invoked in the following environment")
+  );
+}
+
+/** Opening content: the first turn that actually carries a question, so
+ *  image-only or context-only first turns do not claim the label. */
+function openingPrompt(group: ThoughtGroup): string {
+  const prompts = group.segments
+    .map((segment) => displayPrompt(segment.prompt))
+    .filter(Boolean);
+  const usable = prompts.find((prompt) => {
+    const text = prompt.replace(IMAGE_MARKER, "").trim();
+    // A bare slash command says what the user typed, not what they asked for.
+    return (
+      text.length > 0 &&
+      !isInjectedPrompt(text) &&
+      !/^\/[a-z][\w:-]*$/i.test(text)
+    );
+  });
+  return usable ?? "";
+}
+
+/** A finished turn that was short and quick is almost always an auxiliary
+ *  request (title, summary), not something the user is waiting on. */
+function isShortTurn(segment: ThoughtSegment): boolean {
+  if (segment.ended_at == null) return false;
+  return (
+    segment.text.trim().length < SHORT_TURN_CHARS &&
+    segment.ended_at - segment.started_at < SHORT_TURN_MS
+  );
+}
+
+function turnChars(segment: ThoughtSegment): number {
+  return segment.text.trim().length;
+}
+
+/** Project label for a group header. `/` is a real workdir but has no folder
+ *  name, so say what it is instead of showing a lone slash. */
+function workdirLabel(workdir: string): string {
+  const base = basename(workdir);
+  if (base && base !== "/") return base;
+  return workdir.trim() === "/" ? "根目录" : "未标记会话";
+}
+
 /**
- * Name conversations the way the user thinks about them: the project folder.
- * Only conversations whose lifetimes overlap get an ordinal, so two turns in
- * the same project at different times never look like two running windows.
+ * Name conversations the way the user thinks about them: the project folder
+ * plus how the conversation opened. Only conversations whose lifetimes overlap
+ * get an ordinal, so two turns in the same project at different times never
+ * look like two running windows.
  */
 function describeGroups(groups: ThoughtGroup[]): Map<string, GroupMeta> {
   const byName = new Map<string, ThoughtGroup[]>();
   for (const group of groups) {
-    const name = basename(group.workdir) || "未标记会话";
+    const name = workdirLabel(group.workdir);
     const list = byName.get(name);
     if (list) list.push(group);
     else byName.set(name, [group]);
@@ -229,9 +322,11 @@ function describeGroups(groups: ThoughtGroup[]): Map<string, GroupMeta> {
           ranges[index].start <= range.end,
       );
       if (concurrent) ordinal += 1;
+      const opening = openingPrompt(group);
       meta.set(group.key, {
         name: concurrent ? `${name} · ${ordinal}` : name,
-        hint: promptHint(group.firstPrompt),
+        hint: promptHint(opening),
+        opening,
         hue: sessionHue(group.key),
       });
     });
@@ -330,6 +425,77 @@ const ThoughtBody = memo(function ThoughtBody({ text }: { text: string }) {
     </div>
   );
 });
+
+/**
+ * Cut streaming markdown at the last finished block boundary: a blank line or
+ * a closed fenced code block. Everything before it is settled text that can be
+ * parsed once and memoised; only the tail keeps changing while tokens arrive.
+ *
+ * An unterminated fence is excluded from the settled part even when blank lines
+ * appear inside it, otherwise the split would break the code block in two.
+ */
+function splitStreamingMarkdown(text: string): [string, string] {
+  const lines = text.split("\n");
+  let inFence = false;
+  let fenceStart = 0;
+  let offset = 0;
+  let stableEnd = 0;
+  for (const line of lines) {
+    const isFence = /^\s{0,3}(```|~~~)/.test(line);
+    if (inFence) {
+      if (isFence) {
+        inFence = false;
+        stableEnd = offset + line.length + 1;
+      }
+    } else if (isFence) {
+      inFence = true;
+      fenceStart = offset;
+    } else if (line.trim() === "") {
+      stableEnd = offset + line.length + 1;
+    }
+    offset += line.length + 1;
+  }
+  if (inFence) stableEnd = Math.min(stableEnd, fenceStart);
+  return [text.slice(0, stableEnd), text.slice(stableEnd)];
+}
+
+/** Settled prefix of a streaming turn. Its text stops changing, so the memo
+ *  keeps the parsed tree (and its layout) untouched for the rest of the turn. */
+const StableMarkdown = memo(function StableMarkdown({ text }: { text: string }) {
+  return (
+    <Markdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[[rehypeHighlight, { detect: false, ignoreMissing: true }]]}
+      urlTransform={safeUrlTransform}
+      components={markdownComponents}
+    >
+      {text}
+    </Markdown>
+  );
+});
+
+/**
+ * Live body: the finished prefix stays frozen while only the tail re-renders.
+ * The tail skips syntax highlighting so a half-typed code block does not
+ * repaint its colours on every poll.
+ */
+function StreamingBody({ text }: { text: string }) {
+  const [stable, tail] = splitStreamingMarkdown(text);
+  return (
+    <div className="thoughts-text">
+      {stable && <StableMarkdown text={stable} />}
+      {tail && (
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          urlTransform={safeUrlTransform}
+          components={markdownComponents}
+        >
+          {tail}
+        </Markdown>
+      )}
+    </div>
+  );
+}
 
 /**
  * Rolled-up body: while a turn is live, the newest reasoning text drifts across
@@ -431,17 +597,43 @@ const PinIcon = (
   </ToolIcon>
 );
 
+const EdgeHideIcon = (
+  <ToolIcon>
+    <rect x="3" y="4.2" width="14" height="11.6" rx="2.2" />
+    <path d="M7.3 4.6v10.8" />
+    <path d="M11.6 8.3l1.9 1.7-1.9 1.7" />
+  </ToolIcon>
+);
+
+const ClearIcon = (
+  <ToolIcon>
+    <path d="M4.2 5.6h11.6" />
+    <path d="M8.1 5.6V4.2h3.8v1.4" />
+    <path d="M5.6 5.6l.7 10.2h7.4l.7-10.2" />
+    <path d="M8.6 8.4v4.9M11.4 8.4v4.9" />
+  </ToolIcon>
+);
+
 export default function ThoughtsPage() {
-  const { segments, enabled } = useThoughts();
+  const { segments, enabled, clear } = useThoughts();
+  const edgeHide = useEdgeHide();
   const [opacity, setOpacity] = useState(loadOpacity);
-  const [pinned, setPinned] = useState(() => loadPinned() ?? true);
+  const [pinPref, setPinPref] = useState(() => loadPinned() ?? true);
+  // Edge auto-hide only stays reachable while the panel sits above other
+  // windows, so the mode forces the pin on; the saved choice returns with it.
+  const pinned = edgeHide.enabled || pinPref;
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
   const [updatesWhilePaused, setUpdatesWhilePaused] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
-  const [collapsedSegments, setCollapsedSegments] = useState<Set<string>>(
-    () => new Set(),
-  );
+  // Single-focus timeline: exactly one turn is open at a time. The focus
+  // follows the newest live writer unless the user picks a turn by hand.
+  const [pinnedFocusId, setPinnedFocusId] = useState<string | null>(null);
+  const [focusFolded, setFocusFolded] = useState(false);
+  const [hideShort, setHideShort] = useState(loadHideShort);
+  // While the user reads scrolled-back history, the focus must not jump to a
+  // segment streaming elsewhere; freeze the value the follow mode had.
+  const frozenFocusRef = useRef<string | null>(null);
   // Explicit expand/collapse choices per conversation; null means "follow the
   // default" (live and newest conversations stay open, older history folds).
   const [groupToggles, setGroupToggles] = useState<Map<string, boolean>>(
@@ -457,6 +649,9 @@ export default function ThoughtsPage() {
   // Programmatic scrolling emits scroll events too; ignore our own for a moment
   // so streaming text cannot mistake the follow scroll for a user gesture.
   const autoScrollAtRef = useRef(0);
+  // Follow-scrolling eases towards the newest line instead of jumping there, so
+  // a burst of incoming text does not flash the panel.
+  const scrollAnimRef = useRef(0);
 
   // The thoughts window is transparent; the page background carries the
   // user-controlled alpha.
@@ -471,19 +666,13 @@ export default function ThoughtsPage() {
     };
   }, []);
 
-  // The window is created always-on-top; replay the user's last pin choice and
-  // fall back to the live window state when nothing has been stored yet.
+  // The window is created always-on-top; keep the OS state in step with the
+  // derived pin flag so edge-hide can force it on and off again.
   useEffect(() => {
-    const stored = loadPinned();
-    if (stored == null) {
-      void isWindowAlwaysOnTop().then((value) => {
-        if (value != null) setPinned(value);
-      });
-      return;
-    }
-    setPinned(stored);
-    void setWindowAlwaysOnTop(stored);
-  }, []);
+    setWindowAlwaysOnTop(pinned).catch(() => {
+      // The window can disappear mid-toggle; the stored choice still stands.
+    });
+  }, [pinned]);
 
   // Dismiss the appearance popover on any click outside it.
   useEffect(() => {
@@ -497,28 +686,72 @@ export default function ThoughtsPage() {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [prefsOpen]);
 
+  const stopScrollAnimation = useCallback(() => {
+    if (scrollAnimRef.current) {
+      cancelAnimationFrame(scrollAnimRef.current);
+      scrollAnimRef.current = 0;
+    }
+  }, []);
+
+  // Ease-out over roughly one poll interval: each new poll re-targets the same
+  // animation, so text grows into place instead of snapping.
+  const smoothScrollTo = useCallback(
+    (el: HTMLDivElement, target: number) => {
+      stopScrollAnimation();
+      const from = el.scrollTop;
+      const distance = target - from;
+      if (Math.abs(distance) < 1) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        el.scrollTop = target;
+        return;
+      }
+      const duration = Math.min(260, Math.max(90, Math.abs(distance) * 0.9));
+      const startedAt = performance.now();
+      const step = (now: number) => {
+        const progress = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - (1 - progress) ** 3;
+        el.scrollTop = from + distance * eased;
+        autoScrollAtRef.current = performance.now();
+        scrollAnimRef.current =
+          progress < 1 ? requestAnimationFrame(step) : 0;
+      };
+      scrollAnimRef.current = requestAnimationFrame(step);
+    },
+    [stopScrollAnimation],
+  );
+
+  useEffect(
+    () => () => stopScrollAnimation(),
+    [stopScrollAnimation],
+  );
+
   const scrollToLive = useCallback(() => {
     const el = viewerRef.current;
     if (!el) return;
-    const live = el.querySelector<HTMLElement>(LIVE_GROUP_SELECTOR);
+    // Anchor the open turn, not the conversation group: concurrent requests
+    // grow in different blocks, and only the focused one may move the view.
+    const focus = el.querySelector<HTMLElement>(FOCUS_SELECTOR);
     autoScrollAtRef.current = performance.now();
-    if (!live) {
-      el.scrollTop = el.scrollHeight;
+    if (!focus) {
+      smoothScrollTo(el, el.scrollHeight - el.clientHeight);
       return;
     }
-    // Keep the streaming conversation in view even when finished groups follow
-    // it: park its top when the block fits, otherwise its newest line.
+    // Keep the streaming turn in view even when finished turns follow it: park
+    // its top when the block fits, otherwise its newest line.
     const view = el.getBoundingClientRect();
-    const rect = live.getBoundingClientRect();
+    const rect = focus.getBoundingClientRect();
     const delta =
       rect.height < view.height - 24
         ? rect.top - (view.top + 8)
         : rect.bottom - (view.bottom - 12);
-    el.scrollTop = Math.min(
-      el.scrollHeight,
-      Math.max(0, el.scrollTop + delta),
+    smoothScrollTo(
+      el,
+      Math.min(
+        el.scrollHeight - el.clientHeight,
+        Math.max(0, el.scrollTop + delta),
+      ),
     );
-  }, []);
+  }, [smoothScrollTo]);
 
   useEffect(() => {
     if (following) {
@@ -536,13 +769,13 @@ export default function ThoughtsPage() {
     const el = viewerRef.current;
     if (!el) return;
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) return;
-    const live = el.querySelector<HTMLElement>(LIVE_GROUP_SELECTOR);
-    if (!live) {
+    const focus = el.querySelector<HTMLElement>(FOCUS_SELECTOR);
+    if (!focus) {
       setFollowing(false);
       return;
     }
     const view = el.getBoundingClientRect();
-    const rect = live.getBoundingClientRect();
+    const rect = focus.getBoundingClientRect();
     const gap =
       rect.height < view.height - 24
         ? rect.top - (view.top + 8)
@@ -559,28 +792,23 @@ export default function ThoughtsPage() {
     }
   };
 
-  const handlePin = async () => {
-    const next = !pinned;
-    setPinned(next);
+  const handlePin = () => {
+    const next = !pinPref;
+    setPinPref(next);
     try {
       localStorage.setItem(PINNED_KEY, String(next));
     } catch {
       // storage unavailable
     }
-    try {
-      await setWindowAlwaysOnTop(next);
-    } catch {
-      setPinned(!next);
-    }
   };
 
-  const toggleSegment = (sessionId: string) => {
-    setCollapsedSegments((prev) => {
-      const next = new Set(prev);
-      if (next.has(sessionId)) next.delete(sessionId);
-      else next.add(sessionId);
-      return next;
-    });
+  const handleHideShort = (next: boolean) => {
+    setHideShort(next);
+    try {
+      localStorage.setItem(HIDE_SHORT_KEY, String(next));
+    } catch {
+      // storage unavailable
+    }
   };
 
   /** Shrink the window to the pill, or restore the pre-collapse size. */
@@ -614,6 +842,24 @@ export default function ThoughtsPage() {
     void closeCurrentWindow();
   };
 
+  // Clearing drops the whole transcript, so every piece of state that points
+  // into it (focus, folds, paused-follow counter) resets with it.
+  const handleClear = () => {
+    setPinnedFocusId(null);
+    setFocusFolded(false);
+    setGroupToggles(new Map());
+    frozenFocusRef.current = null;
+    setFollowing(true);
+    setUpdatesWhilePaused(0);
+    void clear();
+  };
+
+  // The appearance popover would be left floating over a docked panel.
+  const handleEdgeHide = () => {
+    setPrefsOpen(false);
+    void edgeHide.toggle();
+  };
+
   // The appearance popover does not fit in the pill, so revealing it also
   // unrolls the panel.
   const handlePrefs = () => {
@@ -625,9 +871,89 @@ export default function ThoughtsPage() {
     setPrefsOpen((open) => !open);
   };
 
+  // Auxiliary requests can be hidden on request. The focus is derived from the
+  // visible list so a hidden turn never leaves the panel with nothing open.
+  const visibleSegments = hideShort
+    ? segments.filter((segment) => !isShortTurn(segment))
+    : segments;
+  const hiddenCount = segments.length - visibleSegments.length;
+
+  // The focus follows the live turn that wrote most recently; once nothing is
+  // streaming, the newest substantive turn stays open as the resting state so
+  // the panel does not park on a title generator.
+  let autoFocusId: string | null = null;
+  const liveSegments = visibleSegments.filter((s) => s.ended_at == null);
+  if (liveSegments.length > 0) {
+    autoFocusId = liveSegments.reduce((best, s) =>
+      s.updated_at >= best.updated_at ? s : best,
+    ).session_id;
+  } else if (visibleSegments.length > 0) {
+    const substantive = visibleSegments.filter((s) => !isShortTurn(s));
+    const last = substantive.length
+      ? substantive[substantive.length - 1]
+      : visibleSegments[visibleSegments.length - 1];
+    autoFocusId = last.session_id;
+  }
+
+  // While the user reads scrolled-back history, hold the focus where it was so
+  // text arriving in another turn cannot relayout the passage being read.
+  useEffect(() => {
+    if (!following) return;
+    const current = frozenFocusRef.current;
+    const currentSegment = visibleSegments.find(
+      (s) => s.session_id === current,
+    );
+    // Keep a writer that is still active; only hand the focus over once it has
+    // been quiet long enough for the switch to be meaningful.
+    if (
+      currentSegment &&
+      currentSegment.ended_at == null &&
+      autoFocusId != null &&
+      autoFocusId !== current &&
+      Date.now() - currentSegment.updated_at < FOCUS_HOLD_MS
+    ) {
+      return;
+    }
+    frozenFocusRef.current = autoFocusId;
+  }, [following, autoFocusId, visibleSegments]);
+
+  const pinnedVisible =
+    pinnedFocusId &&
+    visibleSegments.some((s) => s.session_id === pinnedFocusId)
+      ? pinnedFocusId
+      : null;
+  const frozenVisible =
+    frozenFocusRef.current &&
+    visibleSegments.some((s) => s.session_id === frozenFocusRef.current)
+      ? frozenFocusRef.current
+      : null;
+  const focusId = focusFolded
+    ? null
+    : (pinnedVisible ?? (frozenVisible ?? autoFocusId));
+
+  /** Open a turn (locking the focus), or fold it when it is already open. */
+  const activateSegment = (segment: ThoughtSegment) => {
+    if (focusId === segment.session_id) {
+      setPinnedFocusId(null);
+      setFocusFolded(true);
+      return;
+    }
+    setPinnedFocusId(segment.session_id);
+    setFocusFolded(false);
+    if (segment.ended_at == null) {
+      // Watching a live turn should keep it anchored while it writes.
+      frozenFocusRef.current = segment.session_id;
+      setFollowing(true);
+    } else {
+      // Reading history must not be dragged away by a turn streaming below.
+      setFollowing(false);
+    }
+    requestAnimationFrame(scrollToLive);
+  };
+
   // Concurrent clients interleave turns in one flat stream, so the panel groups
   // them by conversation first; a single conversation degrades to the old list.
-  const groups = groupThoughts(segments);
+  const groups = groupThoughts(visibleSegments);
   const groupMeta = describeGroups(groups);
   const grouped = groups.length > 1;
   const newestGroupKey = groups[0]?.key;
@@ -643,10 +969,10 @@ export default function ThoughtsPage() {
   // With concurrent clients the newest-created segment may already be done
   // while an older one still streams, so the rolled-up pill follows the newest
   // turn that is actually live.
-  let active = segments[segments.length - 1];
-  for (let i = segments.length - 1; i >= 0; i -= 1) {
-    if (segments[i].ended_at == null) {
-      active = segments[i];
+  let active = visibleSegments[visibleSegments.length - 1];
+  for (let i = visibleSegments.length - 1; i >= 0; i -= 1) {
+    if (visibleSegments[i].ended_at == null) {
+      active = visibleSegments[i];
       break;
     }
   }
@@ -654,7 +980,7 @@ export default function ThoughtsPage() {
   const tickerText = !enabled
     ? "思考面板未启用"
     : active
-      ? active.text || active.prompt
+      ? active.text || displayPrompt(active.prompt)
       : "等待思考输出…";
 
   const panelStyle = {
@@ -669,20 +995,24 @@ export default function ThoughtsPage() {
     index: number,
     showBadge: boolean,
   ) => {
-    const isCollapsed = collapsedSegments.has(segment.session_id);
+    const open = segment.session_id === focusId;
     const isLive = segment.ended_at == null;
+    const prompt = displayPrompt(segment.prompt);
     return (
       <section
         key={`${index}-${segment.session_id}`}
-        className={`thought-segment${isLive ? " is-live" : ""}`}
+        className={`thought-segment${isLive ? " is-live" : ""}${
+          open ? " is-open" : " is-folded"
+        }`}
         style={{ "--session-hue": String(meta.hue) } as CSSProperties}
+        data-focus-segment={open ? "true" : undefined}
       >
         <button
           type="button"
           className="thought-segment-head"
-          onClick={() => toggleSegment(segment.session_id)}
-          aria-expanded={!isCollapsed}
-          title={segment.prompt || segment.text}
+          onClick={() => activateSegment(segment)}
+          aria-expanded={open}
+          title={prompt || segment.text}
         >
           <span className="thought-segment-index">
             {String(index + 1).padStart(2, "0")}
@@ -695,7 +1025,7 @@ export default function ThoughtsPage() {
             />
           )}
           <span className="thought-segment-prompt">
-            {segment.prompt || "（未记录提问内容）"}
+            {prompt || "（未记录提问内容）"}
           </span>
           {isLive ? (
             <span className="thought-segment-live" aria-label="思考中" />
@@ -706,13 +1036,13 @@ export default function ThoughtsPage() {
           )}
         </button>
 
-        {isCollapsed ? (
-          <div className="thought-segment-ticker-row">
-            <ThoughtTicker text={segment.text} />
-          </div>
-        ) : (
+        {open ? (
           <>
-            <ThoughtBody text={segment.text} />
+            {isLive ? (
+              <StreamingBody text={segment.text} />
+            ) : (
+              <ThoughtBody text={segment.text} />
+            )}
             <div className="thought-segment-foot">
               <span>{formatClock(segment.started_at)}</span>
               {segment.ended_at != null && (
@@ -730,6 +1060,26 @@ export default function ThoughtsPage() {
               </span>
             </div>
           </>
+        ) : (
+          <button
+            type="button"
+            className="thought-segment-ticker-row"
+            onClick={() => activateSegment(segment)}
+            title="切换到这个思考"
+          >
+            <ThoughtTicker text={segment.text} />
+            {isLive ? (
+              <span className="thought-segment-meta is-live">思考中</span>
+            ) : (
+              <span className="thought-segment-meta">
+                {segment.ended_at != null
+                  ? `${formatDuration(segment.started_at, segment.ended_at)} · ${turnChars(
+                      segment,
+                    )} 字`
+                  : ""}
+              </span>
+            )}
+          </button>
         )}
       </section>
     );
@@ -737,10 +1087,28 @@ export default function ThoughtsPage() {
 
   return (
     <div
-      className={`thoughts-window${collapsed ? " is-collapsed" : ""}`}
+      className={`thoughts-window${collapsed ? " is-collapsed" : ""}${
+        edgeHide.hidden ? " is-edge-hidden" : ""
+      }`}
       style={panelStyle}
       data-tauri-drag-region="deep"
     >
+      {edgeHide.enabled && (
+        <button
+          type="button"
+          className={`thoughts-edge-hotzone is-${edgeHide.side}${
+            edgeHide.hidden ? " is-visible" : ""
+          }${live ? " is-live" : ""}`}
+          data-tauri-drag-region="false"
+          onClick={() => void edgeHide.reveal()}
+          onPointerEnter={() => void edgeHide.reveal()}
+          onPointerDown={() => void edgeHide.reveal()}
+          tabIndex={edgeHide.hidden ? 0 : -1}
+          title="展开思考面板"
+          aria-label="展开思考面板"
+        />
+      )}
+
       <div className="thoughts-card">
         <div className="thoughts-toolbar">
           <div className="thoughts-tools">
@@ -757,12 +1125,40 @@ export default function ThoughtsPage() {
             <button
               type="button"
               className={`thoughts-icon-btn${pinned ? " is-active" : ""}`}
-              onClick={() => void handlePin()}
-              title={pinned ? "取消置顶" : "置顶"}
-              aria-label={pinned ? "取消置顶" : "置顶"}
+              onClick={handlePin}
+              disabled={edgeHide.enabled}
+              title={
+                edgeHide.enabled
+                  ? "贴边隐藏时始终置顶"
+                  : pinned
+                    ? "取消置顶"
+                    : "置顶"
+              }
+              aria-label={
+                edgeHide.enabled
+                  ? "贴边隐藏时始终置顶"
+                  : pinned
+                    ? "取消置顶"
+                    : "置顶"
+              }
               aria-pressed={pinned}
             >
               {PinIcon}
+            </button>
+
+            <button
+              type="button"
+              className={`thoughts-icon-btn${edgeHide.enabled ? " is-active" : ""}`}
+              onClick={handleEdgeHide}
+              title={
+                edgeHide.enabled
+                  ? "关闭贴边隐藏"
+                  : "贴边隐藏（鼠标移开后自动收起）"
+              }
+              aria-label={edgeHide.enabled ? "关闭贴边隐藏" : "贴边隐藏"}
+              aria-pressed={edgeHide.enabled}
+            >
+              {EdgeHideIcon}
             </button>
 
             <div className="thoughts-prefs-wrap" ref={prefsRef}>
@@ -800,9 +1196,31 @@ export default function ThoughtsPage() {
                       {Math.round(opacity * 100)}%
                     </span>
                   </div>
+                  <div className="thoughts-prefs-row">
+                    <span className="thoughts-prefs-label">短请求</span>
+                    <label className="thoughts-prefs-check">
+                      <input
+                        type="checkbox"
+                        checked={hideShort}
+                        onChange={(e) => handleHideShort(e.target.checked)}
+                      />
+                      <span>隐藏自动请求（标题/摘要）</span>
+                    </label>
+                  </div>
                 </div>
               )}
             </div>
+
+            <button
+              type="button"
+              className="thoughts-icon-btn"
+              onClick={handleClear}
+              disabled={segments.length === 0}
+              title="清空思考记录"
+              aria-label="清空思考记录"
+            >
+              {ClearIcon}
+            </button>
 
             <button
               type="button"
@@ -856,13 +1274,15 @@ export default function ThoughtsPage() {
             className="thoughts-viewer"
             data-tauri-drag-region="false"
             onScroll={handleScroll}
+            onWheel={stopScrollAnimation}
           >
-            {segments.length > 0 ? (
+            {visibleSegments.length > 0 ? (
               grouped ? (
                 groups.map((group) => {
                   const meta = groupMeta.get(group.key) ?? {
                     name: "未标记会话",
                     hint: "",
+                    opening: "",
                     hue: sessionHue(group.key),
                   };
                   const expanded = isGroupExpanded(group);
@@ -874,18 +1294,15 @@ export default function ThoughtsPage() {
                       style={
                         { "--session-hue": String(meta.hue) } as CSSProperties
                       }
-                      data-live-group={group.live ? "true" : undefined}
                     >
                       <button
                         type="button"
                         className="thought-group-head"
                         onClick={() => toggleGroup(group)}
                         aria-expanded={expanded}
-                        title={
-                          group.workdir
-                            ? `${meta.name} · ${group.workdir}`
-                            : meta.name
-                        }
+                        title={[meta.name, meta.opening, group.workdir]
+                          .filter(Boolean)
+                          .join(" · ")}
                       >
                         <span className="thought-group-dot" aria-hidden="true" />
                         <span className="thought-group-name">{meta.name}</span>
@@ -914,19 +1331,21 @@ export default function ThoughtsPage() {
                       ) : (
                         <div
                           className="thought-group-summary"
-                          title={last.prompt || undefined}
+                          title={displayPrompt(last.prompt) || undefined}
                         >
-                          {promptHint(last.prompt) || "（未记录提问内容）"}
+                          {promptHint(displayPrompt(last.prompt)) ||
+                            "（未记录提问内容）"}
                         </div>
                       )}
                     </section>
                   );
                 })
               ) : (
-                segments.map((segment, index) => {
+                visibleSegments.map((segment, index) => {
                   const meta = groupMeta.get(segmentKey(segment)) ?? {
                     name: "未标记会话",
                     hint: "",
+                    opening: "",
                     hue: sessionHue(segmentKey(segment)),
                   };
                   // One conversation fills the list, so the project tag reads as
@@ -934,6 +1353,10 @@ export default function ThoughtsPage() {
                   return renderSegment(segment, meta, index, index === 0);
                 })
               )
+            ) : hiddenCount > 0 ? (
+              <div className="thoughts-empty-hint thoughts-viewer-empty">
+                已隐藏 {hiddenCount} 个短请求
+              </div>
             ) : (
               <div className="thoughts-empty-hint thoughts-viewer-empty">
                 等待思考输出…
@@ -947,12 +1370,15 @@ export default function ThoughtsPage() {
             type="button"
             className="thoughts-follow"
             onClick={() => {
+              setPinnedFocusId(null);
+              setFocusFolded(false);
+              frozenFocusRef.current = null;
               setFollowing(true);
               scrollToLive();
             }}
           >
             ↓ 继续滚动
-            {updatesWhilePaused > 0 ? `（${updatesWhilePaused} 次更新）` : ""}
+            {updatesWhilePaused > 0 ? " · 有新内容" : ""}
           </button>
         )}
 

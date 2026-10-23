@@ -125,12 +125,35 @@ fn prompt_hint(blocks: &[PromptBlock]) -> String {
             .iter()
             .rev()
             .find_map(|block| match block {
-                PromptBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+                PromptBlock::Text { text }
+                    if !text.trim().is_empty() && !is_injected_context(text) =>
+                {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
+            .or_else(|| last_non_empty_text(blocks))
             .unwrap_or(""),
     };
     text.trim().chars().take(600).collect()
+}
+
+fn last_non_empty_text(blocks: &[PromptBlock]) -> Option<&str> {
+    blocks.iter().rev().find_map(|block| match block {
+        PromptBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// Hosts inject environment and reminder material as ordinary text parts. Those
+/// blocks are huge, so using one as the turn title hides the actual question;
+/// prefer any other text part.
+fn is_injected_context(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("# Environment")
+        || t.starts_with("<environment")
+        || t.starts_with("<system-reminder>")
+        || t.starts_with("You have been invoked in the following environment")
 }
 
 fn last_user_turn(text: &str) -> Option<&str> {

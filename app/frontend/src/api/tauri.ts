@@ -32,6 +32,8 @@ export interface ThoughtSegment {
   workdir: string;
   started_at: number;
   ended_at: number | null;
+  /** Last output time; orders concurrent live turns when picking the focus. */
+  updated_at: number;
   prompt: string;
   text: string;
 }
@@ -92,6 +94,19 @@ export function getThoughts(): Promise<ThoughtSnapshot> {
 
 export function clearThoughts(): Promise<void> {
   return invoke<void>("clear_thoughts");
+}
+
+/**
+ * Subscribe to "the transcript changed" notifications. The event carries no
+ * payload; callers fetch the snapshot themselves so bursts collapse into one
+ * repaint per frame.
+ */
+export function listenThoughts(handler: () => void): Promise<() => void> {
+  const tauri = window.__TAURI__;
+  if (!tauri?.event) {
+    return Promise.reject(new Error("Tauri event API not available"));
+  }
+  return tauri.event.listen("thoughts-updated", () => handler());
 }
 
 export function showSettingsWindow(): Promise<void> {
@@ -192,6 +207,74 @@ export async function setWindowAlwaysOnTop(onTop: boolean): Promise<void> {
 export async function isWindowAlwaysOnTop(): Promise<boolean | null> {
   try {
     return (await currentWindow()?.isAlwaysOnTop()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
+export interface ScreenMonitor {
+  position: ScreenPoint;
+  size: TauriWindowSize;
+  scaleFactor: number;
+  workArea?: { position: ScreenPoint; size: TauriWindowSize } | null;
+}
+
+export interface WindowRect {
+  position: ScreenPoint;
+  size: TauriWindowSize;
+  monitor: ScreenMonitor | null;
+}
+
+/** Physical-pixel geometry of the current window plus the monitor it sits on. */
+export async function getWindowRect(): Promise<WindowRect | null> {
+  const win = currentWindow();
+  if (!win) return null;
+  try {
+    const [position, size, monitor] = await Promise.all([
+      win.outerPosition(),
+      win.outerSize(),
+      getCurrentMonitor(),
+    ]);
+    return { position, size, monitor };
+  } catch {
+    return null;
+  }
+}
+
+export async function setWindowPosition(x: number, y: number): Promise<void> {
+  const win = currentWindow();
+  const PhysicalPosition = window.__TAURI__?.window?.PhysicalPosition;
+  if (!win || !PhysicalPosition) return;
+  try {
+    await win.setPosition(
+      new PhysicalPosition(Math.round(x), Math.round(y)),
+    );
+  } catch {
+    // The window can disappear mid-animation; nothing left to move.
+  }
+}
+
+export async function getCurrentMonitor(): Promise<ScreenMonitor | null> {
+  const api = window.__TAURI__?.window;
+  if (!api) return null;
+  try {
+    return (await api.currentMonitor()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Screen-space cursor position; works even when the window is unfocused. */
+export async function getCursorPosition(): Promise<ScreenPoint | null> {
+  const api = window.__TAURI__?.window;
+  if (!api) return null;
+  try {
+    return (await api.cursorPosition()) ?? null;
   } catch {
     return null;
   }

@@ -2,11 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   clearThoughts,
   getThoughts,
+  listenThoughts,
   type ThoughtSegment,
   type ThoughtSnapshot,
 } from "../api/tauri";
 
-const POLL_MS = 300;
+// The backend pushes an event as soon as the transcript changes, so this poll
+// is only a safety net (missed events, event API unavailable). It is far slower
+// than the old 300ms cadence because it is no longer the streaming source.
+const POLL_MS = 1500;
 
 export interface UseThoughtsResult {
   segments: ThoughtSegment[];
@@ -33,11 +37,20 @@ export function useThoughts(): UseThoughtsResult {
 
   useEffect(() => {
     let cancelled = false;
+    let frame = 0;
+    let inFlight = false;
+    let queued = false;
 
-    const tick = async () => {
-      // The window is only hidden on close, not destroyed; skip IPC while it
-      // is not visible.
-      if (document.hidden) return;
+    const fetchSnapshot = async () => {
+      frame = 0;
+      if (cancelled) return;
+      // A fetch already contains everything up to its start; remember that
+      // more arrived and re-run once it lands instead of stacking IPC calls.
+      if (inFlight) {
+        queued = true;
+        return;
+      }
+      inFlight = true;
       const genAtStart = clearGenRef.current;
       try {
         const snap: ThoughtSnapshot = await getThoughts();
@@ -49,14 +62,49 @@ export function useThoughts(): UseThoughtsResult {
         }
       } catch {
         // window closing
+      } finally {
+        inFlight = false;
+        if (queued && !cancelled) {
+          queued = false;
+          schedule();
+        }
       }
     };
 
-    void tick();
-    const id = window.setInterval(() => void tick(), POLL_MS);
+    // Coalesce event bursts into one snapshot per frame: the backend can emit
+    // dozens of updates while a long chunk is parsed, but the eye needs ~60
+    // commits per second at most.
+    function schedule() {
+      if (cancelled || document.hidden || frame) return;
+      frame = requestAnimationFrame(() => void fetchSnapshot());
+    }
+
+    void fetchSnapshot();
+    const id = window.setInterval(() => void schedule(), POLL_MS);
+
+    let unlisten: (() => void) | null = null;
+    void listenThoughts(schedule)
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // Event API unavailable; the safety poll keeps the panel live.
+      });
+
+    // The window is only hidden on close, not destroyed; catch up when it
+    // becomes visible again instead of relying on the next poll.
+    const onVisibility = () => {
+      if (!document.hidden) void schedule();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      if (frame) cancelAnimationFrame(frame);
+      unlisten?.();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

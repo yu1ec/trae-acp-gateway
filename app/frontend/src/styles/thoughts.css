@@ -10,6 +10,7 @@
   --mono:
     ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   box-sizing: border-box;
+  position: relative;
   height: 100%;
   padding: 8px;
   color: rgb(var(--ink-rgb));
@@ -43,6 +44,7 @@
     inset 0 0 70px rgb(var(--accent) / 0.07);
   backdrop-filter: blur(16px) saturate(1.08);
   -webkit-backdrop-filter: blur(16px) saturate(1.08);
+  transition: opacity 0.16s ease;
 }
 
 /* Corner brackets read as a viewfinder overlay instead of a document card. */
@@ -141,6 +143,11 @@
 .thoughts-icon-btn:disabled {
   opacity: 0.32;
   cursor: default;
+}
+
+/* Edge-hide keeps the pin locked on; show it as active instead of dimmed. */
+.thoughts-icon-btn.is-active:disabled {
+  opacity: 1;
 }
 
 /* Persistent status readout in the top-right corner. */
@@ -267,6 +274,130 @@
   }
 }
 
+/* Edge auto-hide: while parked only this strip remains on screen. Its width
+   mirrors PEEK_LOGICAL in useEdgeHide.ts; the whole strip is the hit area so
+   the pointer does not have to land on the 3px accent bar. */
+.thoughts-edge-hotzone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  width: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 0.18s ease;
+}
+
+.thoughts-edge-hotzone.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Docked right: the part still on screen is the window's left edge. */
+.thoughts-edge-hotzone.is-right {
+  left: 0;
+}
+
+/* Docked left: the part still on screen is the window's right edge. */
+.thoughts-edge-hotzone.is-left {
+  right: 0;
+}
+
+.thoughts-edge-hotzone::before {
+  content: "";
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    180deg,
+    rgb(var(--accent) / 0) 0%,
+    rgb(var(--accent) / 0.9) 18%,
+    rgb(var(--accent) / 0.9) 82%,
+    rgb(var(--accent) / 0) 100%
+  );
+  box-shadow: 0 0 10px rgb(var(--accent) / 0.5);
+  transition:
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.thoughts-edge-hotzone.is-right::before {
+  left: 2px;
+}
+
+.thoughts-edge-hotzone.is-left::before {
+  right: 2px;
+}
+
+/* A live turn sends a light streak down the parked strip, so the hidden panel
+   still reads as "thinking" without being opened. This is a 3px status light,
+   not motion, so it deliberately keeps sweeping while reduced-motion disables
+   the other effects. */
+.thoughts-edge-hotzone::after {
+  content: "";
+  position: absolute;
+  top: 12%;
+  height: 22%;
+  width: 3px;
+  border-radius: 2px;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgb(var(--accent) / 0) 0%,
+    rgb(var(--accent) / 0.55) 26%,
+    rgb(255 255 255 / 0.95) 50%,
+    rgb(var(--accent) / 0.55) 74%,
+    rgb(var(--accent) / 0) 100%
+  );
+  filter: drop-shadow(0 0 6px rgb(var(--accent) / 0.85));
+}
+
+.thoughts-edge-hotzone.is-right::after {
+  left: 2px;
+}
+
+.thoughts-edge-hotzone.is-left::after {
+  right: 2px;
+}
+
+.thoughts-edge-hotzone.is-visible.is-live::after {
+  animation: edge-sheen 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes edge-sheen {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(300%);
+    opacity: 0;
+  }
+}
+
+.thoughts-edge-hotzone.is-visible:hover::before {
+  background: rgb(var(--accent));
+  box-shadow: 0 0 16px rgb(var(--accent) / 0.85);
+}
+
+/* Parked off-screen: the card is gone, leaving only the strip above. */
+.thoughts-window.is-edge-hidden .thoughts-card {
+  opacity: 0;
+}
+
 /* Appearance popover: window opacity lives behind one icon so the pane body
    stays free of controls. */
 .thoughts-prefs-wrap {
@@ -325,6 +456,23 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: rgb(var(--ink-rgb) / 0.55);
+}
+
+.thoughts-prefs-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: rgb(var(--ink-rgb) / 0.7);
+  cursor: pointer;
+  user-select: none;
+}
+
+.thoughts-prefs-check input[type="checkbox"] {
+  flex-shrink: 0;
+  accent-color: rgb(var(--accent));
+  cursor: pointer;
 }
 
 .thoughts-viewer {
@@ -474,15 +622,21 @@
   white-space: nowrap;
 }
 
+/* The opening summary reads as part of the group name: project · how it began. */
 .thought-group-hint {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   font-size: 11.5px;
   line-height: 1.6;
-  color: rgb(var(--ink-rgb) / 0.46);
+  color: rgb(var(--ink-rgb) / 0.6);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.thought-group-hint::before {
+  content: "· ";
+  opacity: 0.55;
 }
 
 .thought-group-count,
@@ -888,12 +1042,25 @@
 }
 
 /* Collapsed body: a one-line ticker pinned to the newest text, so the turn
-   stays readable while the segment occupies a single line. */
+   stays readable while the segment occupies a single line. It is also the
+   affordance that brings a background turn into focus. */
 .thought-segment-ticker-row {
   display: flex;
+  align-items: baseline;
+  width: 100%;
   margin-top: 6px;
-  padding-left: 12px;
+  padding: 0 0 0 12px;
+  border: 0;
   border-left: 1px solid rgb(var(--accent) / 0.18);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thought-segment-ticker-row:hover {
+  border-left-color: rgb(var(--accent) / 0.45);
 }
 
 .thought-segment-ticker {
@@ -915,6 +1082,65 @@
 
 .thought-segment-ticker::-webkit-scrollbar {
   display: none;
+}
+
+/* Trailing facts for a folded turn: how long it ran and how much it thought. */
+.thought-segment-meta {
+  flex-shrink: 0;
+  margin-left: 10px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--ink-rgb) / 0.34);
+  white-space: nowrap;
+}
+
+.thought-segment-meta.is-live {
+  color: rgb(var(--accent) / 0.8);
+}
+
+/* The open turn is the only place new text appears, so it gets the lane bar:
+   a 2px session-coloured rail that makes the active block obvious at a glance. */
+.thought-segment.is-open::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -12px;
+  width: 2px;
+  border-radius: 1px;
+  background: linear-gradient(
+    180deg,
+    hsl(var(--session-hue) 72% 64% / 0.85),
+    hsl(var(--session-hue) 72% 64% / 0.12)
+  );
+}
+
+.thought-segment.is-folded .thought-segment-prompt {
+  color: rgb(var(--ink-rgb) / 0.55);
+}
+
+/* A quiet caret marks the stream's growing edge without reflowing the prose. */
+.thought-segment.is-live .thoughts-text > p:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  margin-left: 4px;
+  vertical-align: -0.12em;
+  background: rgb(var(--accent) / 0.75);
+  animation: thought-caret 1s steps(2, start) infinite;
+}
+
+@keyframes thought-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 /* Per-turn metadata stays quiet until the reader hovers the turn. */
