@@ -27,6 +27,8 @@ export interface AppConfig {
 
 export interface ThoughtSegment {
   session_id: string;
+  /** Client conversation id, stable across turns of the same session. */
+  client_session: string | null;
   workdir: string;
   started_at: number;
   ended_at: number | null;

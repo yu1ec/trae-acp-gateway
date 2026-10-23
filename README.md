@@ -251,7 +251,9 @@ App 配置保存在 `{app_data_dir}/config.json`，字段 `auto_check_update`（
 
 ### 思考面板
 
-设置页勾选 **启用思考面板** 并保存后，可从设置页的「打开思考面板」或托盘菜单的 **Open Thoughts** 打开一个置顶悬浮面板。面板实时滚动显示 ACP `agent_thought_chunk` 思考流，支持搜索高亮、清除、绿色/黑色两种皮肤、面板内调整透明度，以及通过图钉按钮切换是否置顶。
+设置页勾选 **启用思考面板** 并保存后，可从设置页的「打开思考面板」或托盘菜单的 **Open Thoughts** 打开一个置顶悬浮面板。面板实时滚动显示 ACP `agent_thought_chunk` 思考流，支持面板内调整透明度，以及通过图钉按钮切换是否置顶。
+
+多个客户端会话并发时，同一会话的思考使用相同颜色和短标签，交错输出也能一眼看出归属。Claude Code 会自动通过 `X-Claude-Code-Session-Id` 上报会话 ID；其他客户端可使用 `X-Session-Id` / `X-Conversation-Id`，或 Anthropic 请求体的 `metadata.session_id`。未上报会话 ID 的请求标记为「未标记」。
 
 思考流通过独立 side channel 展示，不会伪造成 Anthropic thinking 块写回响应，因此不会影响 Claude Code 的工具执行；即使客户端没有开启 thinking，面板也能看到 agent 的真实思考输出。
 

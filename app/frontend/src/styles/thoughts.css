@@ -1,11 +1,12 @@
 /* A floating HUD pane: transparent window, translucent glass card, hairline
-   accent frame and corner brackets. All colors derive from the two skin
-   variables so the green and black skins keep their own contrast. */
+   accent frame and corner brackets. All colors derive from the ink and accent
+   variables so every derived alpha stays legible on the dark glass. */
 .thoughts-window {
   --thought-alpha: 0.82;
-  --paper-rgb: 233 244 216;
-  --ink-rgb: 30 42 25;
-  --accent: 44 122 64;
+  --paper-rgb: 11 14 13;
+  --ink-rgb: 228 242 232;
+  --accent: 96 240 158;
+  color-scheme: dark;
   --mono:
     ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   box-sizing: border-box;
@@ -222,6 +223,12 @@
   white-space: nowrap;
 }
 
+/* The pill may host a session tag beside the ticker. */
+.thoughts-collapsed .thoughts-marquee {
+  flex: 1;
+  min-width: 0;
+}
+
 /* Once thinking stops the drift is gone, so pin the view to the newest text. */
 .thoughts-marquee.is-tail {
   display: flex;
@@ -260,8 +267,8 @@
   }
 }
 
-/* Appearance popover: skin and window opacity live behind one icon so the
-   pane body stays free of controls. */
+/* Appearance popover: window opacity lives behind one icon so the pane body
+   stays free of controls. */
 .thoughts-prefs-wrap {
   position: relative;
   display: flex;
@@ -302,48 +309,6 @@
   font-size: 9.5px;
   letter-spacing: 0.12em;
   color: rgb(var(--ink-rgb) / 0.5);
-}
-
-.thoughts-skins {
-  display: flex;
-  gap: 6px;
-}
-
-.thoughts-skin {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 9px 4px 5px;
-  border: 1px solid rgb(var(--ink-rgb) / 0.16);
-  border-radius: 999px;
-  background: transparent;
-  color: rgb(var(--ink-rgb) / 0.68);
-  font-family: inherit;
-  font-size: 11px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    background-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.thoughts-skin:hover {
-  border-color: rgb(var(--ink-rgb) / 0.32);
-  color: rgb(var(--ink-rgb) / 0.92);
-}
-
-.thoughts-skin.is-selected {
-  border-color: rgb(var(--accent) / 0.65);
-  background: rgb(var(--accent) / 0.1);
-  color: rgb(var(--ink-rgb) / 0.95);
-}
-
-.thoughts-skin-dot {
-  width: 12px;
-  height: 12px;
-  border: 1px solid rgb(var(--ink-rgb) / 0.24);
-  border-radius: 50%;
 }
 
 .thoughts-prefs input[type="range"] {
@@ -388,8 +353,182 @@
   background-clip: padding-box;
 }
 
+/* Session tag: the hue is derived from the client conversation id, so turns
+   from concurrent sessions stay distinguishable when they interleave. */
+.thought-session {
+  --session-hue: 152;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 34%;
+  padding: 1px 6px;
+  border: 1px solid hsl(var(--session-hue) 70% 62% / 0.28);
+  border-radius: 4px;
+  background: hsl(var(--session-hue) 70% 62% / 0.08);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.7;
+  letter-spacing: 0.04em;
+  color: hsl(var(--session-hue) 70% 68%);
+  user-select: none;
+}
+
+/* The tag carries the project name now, so it can outgrow the row. */
+.thought-session-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thought-session.is-unknown {
+  border-color: rgb(var(--ink-rgb) / 0.16);
+  background: rgb(var(--ink-rgb) / 0.05);
+  color: rgb(var(--ink-rgb) / 0.42);
+}
+
+.thought-session-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.thought-session.is-unknown .thought-session-dot {
+  box-shadow: none;
+}
+
+/* Conversation groups: turns from one client session stay together, so two
+   concurrent terminal windows never interleave their reasoning. */
+.thought-group {
+  --session-hue: 152;
+  margin: 0 0 12px;
+}
+
+.thought-group + .thought-group {
+  margin-top: 20px;
+}
+
+/* The header sticks to the top while its own history scrolls, which keeps the
+   "which project is this" answer visible inside long conversations. */
+.thought-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 5px 9px;
+  border: 0;
+  border-left: 2px solid hsl(var(--session-hue) 70% 60% / 0.5);
+  border-radius: 0 7px 7px 0;
+  background: linear-gradient(
+    90deg,
+    hsl(var(--session-hue) 70% 55% / 0.16),
+    rgb(var(--paper-rgb) / 0.72) 62%
+  );
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.thought-group.is-live .thought-group-head {
+  border-left-color: hsl(var(--session-hue) 75% 64% / 0.9);
+  background: linear-gradient(
+    90deg,
+    hsl(var(--session-hue) 70% 55% / 0.24),
+    rgb(var(--paper-rgb) / 0.72) 62%
+  );
+}
+
+.thought-group-head[aria-expanded="false"] {
+  margin-bottom: 0;
+}
+
+.thought-group-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: hsl(var(--session-hue) 70% 62%);
+  box-shadow: 0 0 8px hsl(var(--session-hue) 70% 62% / 0.55);
+}
+
+.thought-group-name {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  color: hsl(var(--session-hue) 72% 76%);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thought-group-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: rgb(var(--ink-rgb) / 0.46);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thought-group-count,
+.thought-group-time {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--ink-rgb) / 0.4);
+}
+
+.thought-group-live {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: rgb(var(--accent));
+  box-shadow: 0 0 0 0 rgb(var(--accent) / 0.45);
+  animation: thought-pulse 1.6s ease-out infinite;
+}
+
+/* Folded history: one quiet line, so finished sessions stay out of the way. */
+.thought-group-summary {
+  overflow: hidden;
+  padding: 0 0 0 10px;
+  border-left: 1px dotted hsl(var(--session-hue) 70% 62% / 0.3);
+  margin-left: 2px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: rgb(var(--ink-rgb) / 0.42);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thought-group .thought-segment {
+  margin-bottom: 12px;
+}
+
+.thought-group .thought-segment + .thought-segment {
+  padding-top: 13px;
+}
+
 /* One prompt turn, framed as a HUD log entry rather than a checklist row. */
 .thought-segment {
+  --session-hue: 152;
   position: relative;
   margin: 0 0 18px;
 }
@@ -444,6 +583,14 @@
   transition:
     border-color 0.15s ease,
     box-shadow 0.15s ease;
+}
+
+/* The turn badge and the reasoning rail carry the session colour, so a block
+   is attributable even before the eye reaches the tag. */
+.thought-segment .thought-segment-index {
+  border-color: hsl(var(--session-hue) 70% 62% / 0.34);
+  background: hsl(var(--session-hue) 70% 62% / 0.08);
+  color: hsl(var(--session-hue) 70% 68%);
 }
 
 .thought-segment.is-live .thought-segment-index {
@@ -509,18 +656,235 @@
 .thoughts-text {
   margin: 8px 0 0;
   padding-left: 12px;
-  border-left: 1px solid rgb(var(--accent) / 0.18);
+  border-left: 1px solid hsl(var(--session-hue) 70% 62% / 0.24);
   max-width: 74ch;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: inherit;
   font-size: 14px;
-  line-height: 1.9;
+  line-height: 1.8;
   letter-spacing: 0.01em;
   color: rgb(var(--ink-rgb) / 0.82);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   user-select: text;
+}
+
+/* Markdown body. Blocks inherit the prose face; only code switches to mono. */
+.thoughts-text > :first-child {
+  margin-top: 0;
+}
+
+.thoughts-text > :last-child {
+  margin-bottom: 0;
+}
+
+.thoughts-text p {
+  margin: 0 0 0.65em;
+}
+
+.thoughts-text h1,
+.thoughts-text h2,
+.thoughts-text h3,
+.thoughts-text h4,
+.thoughts-text h5,
+.thoughts-text h6 {
+  margin: 1.1em 0 0.45em;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  color: rgb(var(--ink-rgb) / 0.94);
+}
+
+.thoughts-text h1 {
+  font-size: 17px;
+}
+
+.thoughts-text h2 {
+  font-size: 16px;
+}
+
+.thoughts-text h3 {
+  font-size: 15px;
+}
+
+.thoughts-text h4,
+.thoughts-text h5,
+.thoughts-text h6 {
+  font-size: 14px;
+}
+
+.thoughts-text ul,
+.thoughts-text ol {
+  margin: 0 0 0.65em;
+  padding-left: 1.45em;
+}
+
+.thoughts-text li + li {
+  margin-top: 0.18em;
+}
+
+.thoughts-text li > p {
+  margin: 0;
+}
+
+.thoughts-text li::marker {
+  color: rgb(var(--accent) / 0.7);
+}
+
+.thoughts-text strong {
+  font-weight: 600;
+  color: rgb(var(--ink-rgb) / 0.95);
+}
+
+.thoughts-text a {
+  color: rgb(var(--accent));
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--accent) / 0.4);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.thoughts-text a:hover {
+  text-decoration-color: rgb(var(--accent) / 0.85);
+}
+
+.thoughts-text code {
+  padding: 0.1em 0.35em;
+  border: 1px solid rgb(var(--ink-rgb) / 0.09);
+  border-radius: 4px;
+  background: rgb(var(--ink-rgb) / 0.06);
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: rgb(var(--ink-rgb) / 0.9);
+}
+
+.thoughts-text pre {
+  margin: 0.6em 0 0.75em;
+  padding: 9px 12px;
+  border: 1px solid rgb(var(--accent) / 0.16);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 0.24);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--ink-rgb) / 0.25) transparent;
+}
+
+.thoughts-text pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+/* Syntax highlighting from rehype-highlight (hljs-* class names). The palette
+   stays inside the ink/accent system: cyan for structure, amber for literals,
+   rose for deletions, so highlighted code still reads as the same HUD surface. */
+.thoughts-text .hljs {
+  color: rgb(var(--ink-rgb) / 0.82);
+}
+
+.thoughts-text .hljs-comment,
+.thoughts-text .hljs-quote {
+  color: rgb(var(--ink-rgb) / 0.38);
+  font-style: italic;
+}
+
+.thoughts-text .hljs-keyword,
+.thoughts-text .hljs-selector-tag,
+.thoughts-text .hljs-literal,
+.thoughts-text .hljs-type,
+.thoughts-text .hljs-doctag {
+  color: rgb(126 214 255 / 0.95);
+}
+
+.thoughts-text .hljs-string,
+.thoughts-text .hljs-regexp,
+.thoughts-text .hljs-addition,
+.thoughts-text .hljs-attribute {
+  color: rgb(226 199 132 / 0.95);
+}
+
+.thoughts-text .hljs-number,
+.thoughts-text .hljs-symbol,
+.thoughts-text .hljs-bullet {
+  color: rgb(244 168 128 / 0.95);
+}
+
+.thoughts-text .hljs-title,
+.thoughts-text .hljs-section,
+.thoughts-text .hljs-name,
+.thoughts-text .hljs-built_in {
+  color: rgb(var(--accent) / 0.95);
+}
+
+.thoughts-text .hljs-attr,
+.thoughts-text .hljs-variable,
+.thoughts-text .hljs-template-variable,
+.thoughts-text .hljs-selector-class,
+.thoughts-text .hljs-selector-id {
+  color: rgb(198 170 255 / 0.95);
+}
+
+.thoughts-text .hljs-meta,
+.thoughts-text .hljs-template-tag {
+  color: rgb(var(--ink-rgb) / 0.6);
+}
+
+.thoughts-text .hljs-deletion {
+  color: rgb(255 150 160 / 0.95);
+}
+
+.thoughts-text .hljs-emphasis {
+  font-style: italic;
+}
+
+.thoughts-text .hljs-strong {
+  font-weight: 600;
+}
+
+.thoughts-text .hljs-link {
+  text-decoration: underline;
+}
+
+.thoughts-text blockquote {
+  margin: 0.6em 0;
+  padding: 0.1em 0 0.1em 12px;
+  border-left: 2px solid rgb(var(--accent) / 0.32);
+  color: rgb(var(--ink-rgb) / 0.62);
+}
+
+.thoughts-text hr {
+  height: 1px;
+  margin: 1em 0;
+  border: 0;
+  background: rgb(var(--ink-rgb) / 0.12);
+}
+
+.thoughts-text table {
+  display: block;
+  margin: 0.6em 0 0.75em;
+  border-collapse: collapse;
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+
+.thoughts-text th,
+.thoughts-text td {
+  padding: 4px 9px;
+  border: 1px solid rgb(var(--ink-rgb) / 0.12);
+  text-align: left;
+}
+
+.thoughts-text th {
+  background: rgb(var(--ink-rgb) / 0.05);
+  font-weight: 600;
+}
+
+.thoughts-text img {
+  max-width: 100%;
+  border-radius: 6px;
 }
 
 /* Collapsed body: a one-line ticker pinned to the newest text, so the turn

@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -6,21 +7,25 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import Markdown, { type Components } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
 import {
   closeCurrentWindow,
   getWindowScaleFactor,
   getWindowSize,
   isWindowAlwaysOnTop,
+  openExternalUrl,
   setWindowAlwaysOnTop,
   setWindowLogicalSize,
   setWindowPhysicalSize,
   showSettingsWindow,
+  type ThoughtSegment,
 } from "../api/tauri";
 import { useThoughts } from "../hooks/useThoughts";
 import "../styles/thoughts.css";
 
 const OPACITY_KEY = "trae-thoughts-opacity";
-const SKIN_KEY = "trae-thoughts-skin";
 const PINNED_KEY = "trae-thoughts-pinned";
 const EXPANDED_SIZE_KEY = "trae-thoughts-expanded-size";
 const DEFAULT_OPACITY = 0.82;
@@ -31,38 +36,6 @@ const COLLAPSED_HEIGHT = 60;
 // so keeping the last few hundred characters bounds the DOM for long turns.
 const TICKER_CHARS = 400;
 
-interface Skin {
-  id: "green" | "black";
-  label: string;
-  /** Space-separated RGB channels, consumed by `rgb(var(--paper-rgb) / a)`. */
-  paper: string;
-  ink: string;
-  accent: string;
-  /** Drives the native color-scheme so scrollbars and form controls match. */
-  dark: boolean;
-}
-
-// Two HUD skins only: a pale signal-green glass and a near-black terminal
-// glass. Ink is inverted for the dark skin so every derived alpha stays legible.
-const SKINS: Skin[] = [
-  {
-    id: "green",
-    label: "绿色",
-    paper: "233 244 216",
-    ink: "30 42 25",
-    accent: "44 122 64",
-    dark: false,
-  },
-  {
-    id: "black",
-    label: "黑色",
-    paper: "11 14 13",
-    ink: "228 242 232",
-    accent: "96 240 158",
-    dark: true,
-  },
-];
-
 function loadOpacity(): number {
   try {
     const raw = Number(localStorage.getItem(OPACITY_KEY));
@@ -71,17 +44,6 @@ function loadOpacity(): number {
     // storage unavailable
   }
   return DEFAULT_OPACITY;
-}
-
-function loadSkin(): Skin {
-  try {
-    const id = localStorage.getItem(SKIN_KEY);
-    const found = SKINS.find((skin) => skin.id === id);
-    if (found) return found;
-  } catch {
-    // storage unavailable
-  }
-  return SKINS[0];
 }
 
 function loadPinned(): boolean | null {
@@ -150,6 +112,159 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+// One gateway request starts a fresh ACP session, so the per-turn id cannot
+// identify the conversation. The client's own session id does; give each one a
+// stable colour so interleaved turns stay attributable at a glance.
+const SESSION_HUES = [152, 193, 39, 275, 340, 218];
+// The group header shows the project folder and the opening question; ids stay
+// in the tooltip because nobody recognises a hex string.
+const PROMPT_HINT_CHARS = 18;
+const LIVE_GROUP_SELECTOR = '[data-live-group="true"]';
+
+function sessionHue(key: string): number {
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  }
+  return SESSION_HUES[Math.abs(hash) % SESSION_HUES.length];
+}
+
+/** Grouping key: the client conversation when there is one, else this turn. */
+function segmentKey(segment: ThoughtSegment): string {
+  const client = segment.client_session?.trim();
+  return client ? `client:${client}` : `turn:${segment.session_id}`;
+}
+
+/** One conversation: every turn that shares a client session id. */
+interface ThoughtGroup {
+  key: string;
+  workdir: string;
+  segments: ThoughtSegment[];
+  startedAt: number;
+  lastActivity: number;
+  live: boolean;
+  firstPrompt: string;
+}
+
+interface GroupMeta {
+  /** Human name: the project folder, disambiguated only when it must be. */
+  name: string;
+  /** Opening question of the conversation, truncated for the group header. */
+  hint: string;
+  hue: number;
+}
+
+function groupThoughts(segments: ThoughtSegment[]): ThoughtGroup[] {
+  const groups = new Map<string, ThoughtGroup>();
+  for (const segment of segments) {
+    const key = segmentKey(segment);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        workdir: segment.workdir,
+        segments: [],
+        startedAt: segment.started_at,
+        lastActivity: segment.ended_at ?? segment.started_at,
+        live: false,
+        firstPrompt: "",
+      };
+      groups.set(key, group);
+    }
+    group.segments.push(segment);
+    group.startedAt = Math.min(group.startedAt, segment.started_at);
+    group.lastActivity = Math.max(
+      group.lastActivity,
+      segment.ended_at ?? segment.started_at,
+    );
+    group.live = group.live || segment.ended_at == null;
+    if (!group.firstPrompt && segment.prompt.trim()) {
+      group.firstPrompt = segment.prompt;
+    }
+  }
+
+  // Live conversations first, then most recent activity, so the session the
+  // user is watching never sinks below finished history.
+  return [...groups.values()].sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1;
+    return b.lastActivity - a.lastActivity;
+  });
+}
+
+function promptHint(prompt: string): string {
+  const line = prompt.trim().replace(/\s+/g, " ");
+  if (!line) return "";
+  return line.length > PROMPT_HINT_CHARS
+    ? `${line.slice(0, PROMPT_HINT_CHARS)}…`
+    : line;
+}
+
+/**
+ * Name conversations the way the user thinks about them: the project folder.
+ * Only conversations whose lifetimes overlap get an ordinal, so two turns in
+ * the same project at different times never look like two running windows.
+ */
+function describeGroups(groups: ThoughtGroup[]): Map<string, GroupMeta> {
+  const byName = new Map<string, ThoughtGroup[]>();
+  for (const group of groups) {
+    const name = basename(group.workdir) || "未标记会话";
+    const list = byName.get(name);
+    if (list) list.push(group);
+    else byName.set(name, [group]);
+  }
+
+  const meta = new Map<string, GroupMeta>();
+  for (const [name, list] of byName) {
+    const ordered = [...list].sort((a, b) => a.startedAt - b.startedAt);
+    const ranges = ordered.map((group) => ({
+      start: group.startedAt,
+      end: group.live ? Number.POSITIVE_INFINITY : group.lastActivity,
+    }));
+    let ordinal = 0;
+    ordered.forEach((group, index) => {
+      const concurrent = ranges.some(
+        (range, other) =>
+          other !== index &&
+          range.start <= ranges[index].end &&
+          ranges[index].start <= range.end,
+      );
+      if (concurrent) ordinal += 1;
+      meta.set(group.key, {
+        name: concurrent ? `${name} · ${ordinal}` : name,
+        hint: promptHint(group.firstPrompt),
+        hue: sessionHue(group.key),
+      });
+    });
+  }
+  return meta;
+}
+
+/** Coloured conversation tag: the panel's answer to "whose thought is this?" */
+function SessionBadge({
+  label,
+  hue,
+  sessionId,
+}: {
+  label: string;
+  hue: number;
+  sessionId: string | null;
+}) {
+  return (
+    <span
+      className={`thought-session${sessionId ? "" : " is-unknown"}`}
+      style={{ "--session-hue": String(hue) } as CSSProperties}
+      title={
+        sessionId
+          ? `${label} · 会话 ${sessionId}`
+          : `${label} · 客户端未报告会话标识`
+      }
+    >
+      <span className="thought-session-dot" aria-hidden="true" />
+      <span className="thought-session-label">{label}</span>
+    </span>
+  );
+}
+
 /** Collapsed segment body: one line that follows the newest reasoning text. */
 function ThoughtTicker({ text }: { text: string }) {
   const ref = useRef<HTMLSpanElement>(null);
@@ -167,6 +282,54 @@ function ThoughtTicker({ text }: { text: string }) {
     </span>
   );
 }
+
+// Only absolute http(s) URLs survive. react-markdown's default already drops
+// `javascript:` and friends, but an allowlist keeps encoded or unknown schemes
+// out of `href`/`src` entirely, so nothing attacker-controlled reaches an
+// attribute that the webview could execute.
+function safeUrlTransform(url: string): string {
+  return /^https?:\/\//i.test(url.trim()) ? url : "";
+}
+
+// Reasoning is markdown-ish prose. Raw HTML stays escaped (react-markdown's
+// default, no rehype-raw) and links leave the webview instead of replacing the
+// panel. Highlighting is class-based too: rehype-highlight emits <span> nodes,
+// never HTML strings, so fenced code cannot inject markup.
+const markdownComponents: Components = {
+  a({ href, children }) {
+    return (
+      <a
+        href={href}
+        title={href}
+        onClick={(event) => {
+          event.preventDefault();
+          if (href && /^https?:\/\//i.test(href)) void openExternalUrl(href);
+        }}
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
+/** Rendered markdown body. Memoed so finished turns skip re-parsing while the
+ *  live turn streams. */
+const ThoughtBody = memo(function ThoughtBody({ text }: { text: string }) {
+  return (
+    <div className="thoughts-text">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[
+          [rehypeHighlight, { detect: false, ignoreMissing: true }],
+        ]}
+        urlTransform={safeUrlTransform}
+        components={markdownComponents}
+      >
+        {text}
+      </Markdown>
+    </div>
+  );
+});
 
 /**
  * Rolled-up body: while a turn is live, the newest reasoning text drifts across
@@ -271,7 +434,6 @@ const PinIcon = (
 export default function ThoughtsPage() {
   const { segments, enabled } = useThoughts();
   const [opacity, setOpacity] = useState(loadOpacity);
-  const [skin, setSkin] = useState<Skin>(loadSkin);
   const [pinned, setPinned] = useState(() => loadPinned() ?? true);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
@@ -280,6 +442,11 @@ export default function ThoughtsPage() {
   const [collapsedSegments, setCollapsedSegments] = useState<Set<string>>(
     () => new Set(),
   );
+  // Explicit expand/collapse choices per conversation; null means "follow the
+  // default" (live and newest conversations stay open, older history folds).
+  const [groupToggles, setGroupToggles] = useState<Map<string, boolean>>(
+    () => new Map(),
+  );
   const viewerRef = useRef<HTMLDivElement>(null);
   const prefsRef = useRef<HTMLDivElement>(null);
   const expandedSizeRef = useRef<TauriWindowSize | null>(loadExpandedSize());
@@ -287,6 +454,9 @@ export default function ThoughtsPage() {
   // one captured when this render's handler was created.
   const followingRef = useRef(following);
   followingRef.current = following;
+  // Programmatic scrolling emits scroll events too; ignore our own for a moment
+  // so streaming text cannot mistake the follow scroll for a user gesture.
+  const autoScrollAtRef = useRef(0);
 
   // The thoughts window is transparent; the page background carries the
   // user-controlled alpha.
@@ -327,15 +497,33 @@ export default function ThoughtsPage() {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [prefsOpen]);
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToLive = useCallback(() => {
     const el = viewerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const live = el.querySelector<HTMLElement>(LIVE_GROUP_SELECTOR);
+    autoScrollAtRef.current = performance.now();
+    if (!live) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    // Keep the streaming conversation in view even when finished groups follow
+    // it: park its top when the block fits, otherwise its newest line.
+    const view = el.getBoundingClientRect();
+    const rect = live.getBoundingClientRect();
+    const delta =
+      rect.height < view.height - 24
+        ? rect.top - (view.top + 8)
+        : rect.bottom - (view.bottom - 12);
+    el.scrollTop = Math.min(
+      el.scrollHeight,
+      Math.max(0, el.scrollTop + delta),
+    );
   }, []);
 
   useEffect(() => {
     if (following) {
       setUpdatesWhilePaused(0);
-      requestAnimationFrame(scrollToBottom);
+      requestAnimationFrame(scrollToLive);
     } else {
       setUpdatesWhilePaused((n) => n + 1);
     }
@@ -344,25 +532,28 @@ export default function ThoughtsPage() {
 
   const handleScroll = () => {
     if (!followingRef.current) return;
+    if (performance.now() - autoScrollAtRef.current < 150) return;
     const el = viewerRef.current;
     if (!el) return;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
-    if (!atBottom) setFollowing(false);
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) return;
+    const live = el.querySelector<HTMLElement>(LIVE_GROUP_SELECTOR);
+    if (!live) {
+      setFollowing(false);
+      return;
+    }
+    const view = el.getBoundingClientRect();
+    const rect = live.getBoundingClientRect();
+    const gap =
+      rect.height < view.height - 24
+        ? rect.top - (view.top + 8)
+        : rect.bottom - (view.bottom - 12);
+    if (Math.abs(gap) > 24) setFollowing(false);
   };
 
   const handleOpacity = (value: number) => {
     setOpacity(value);
     try {
       localStorage.setItem(OPACITY_KEY, String(value));
-    } catch {
-      // storage unavailable
-    }
-  };
-
-  const handleSkinChange = (next: Skin) => {
-    setSkin(next);
-    try {
-      localStorage.setItem(SKIN_KEY, next.id);
     } catch {
       // storage unavailable
     }
@@ -411,8 +602,8 @@ export default function ThoughtsPage() {
       // Keep the in-page state usable even if the window API is unavailable.
     }
     setCollapsed(next);
-    if (!next) requestAnimationFrame(scrollToBottom);
-  }, [scrollToBottom]);
+    if (!next) requestAnimationFrame(scrollToLive);
+  }, [scrollToLive]);
 
   const handleRollUp = () => {
     if (!collapsed) setPrefsOpen(false);
@@ -425,7 +616,7 @@ export default function ThoughtsPage() {
 
   // The appearance popover does not fit in the pill, so revealing it also
   // unrolls the panel.
-  const handleSkin = () => {
+  const handlePrefs = () => {
     if (collapsed) {
       void setRolledUp(false);
       setPrefsOpen(true);
@@ -434,22 +625,115 @@ export default function ThoughtsPage() {
     setPrefsOpen((open) => !open);
   };
 
-  const latest = segments[segments.length - 1];
+  // Concurrent clients interleave turns in one flat stream, so the panel groups
+  // them by conversation first; a single conversation degrades to the old list.
+  const groups = groupThoughts(segments);
+  const groupMeta = describeGroups(groups);
+  const grouped = groups.length > 1;
+  const newestGroupKey = groups[0]?.key;
+
+  const isGroupExpanded = (group: ThoughtGroup): boolean =>
+    groupToggles.get(group.key) ?? (group.live || group.key === newestGroupKey);
+
+  const toggleGroup = (group: ThoughtGroup) => {
+    const next = !isGroupExpanded(group);
+    setGroupToggles((prev) => new Map(prev).set(group.key, next));
+  };
+
+  // With concurrent clients the newest-created segment may already be done
+  // while an older one still streams, so the rolled-up pill follows the newest
+  // turn that is actually live.
+  let active = segments[segments.length - 1];
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    if (segments[i].ended_at == null) {
+      active = segments[i];
+      break;
+    }
+  }
+  const activeMeta = active ? groupMeta.get(segmentKey(active)) : undefined;
   const tickerText = !enabled
     ? "思考面板未启用"
-    : latest
-      ? latest.text || latest.prompt
+    : active
+      ? active.text || active.prompt
       : "等待思考输出…";
 
   const panelStyle = {
     "--thought-alpha": String(opacity),
-    "--paper-rgb": skin.paper,
-    "--ink-rgb": skin.ink,
-    "--accent": skin.accent,
-    colorScheme: skin.dark ? "dark" : "light",
   } as CSSProperties;
 
-  const live = enabled && latest != null && latest.ended_at == null;
+  const live = enabled && active != null && active.ended_at == null;
+
+  const renderSegment = (
+    segment: ThoughtSegment,
+    meta: GroupMeta,
+    index: number,
+    showBadge: boolean,
+  ) => {
+    const isCollapsed = collapsedSegments.has(segment.session_id);
+    const isLive = segment.ended_at == null;
+    return (
+      <section
+        key={`${index}-${segment.session_id}`}
+        className={`thought-segment${isLive ? " is-live" : ""}`}
+        style={{ "--session-hue": String(meta.hue) } as CSSProperties}
+      >
+        <button
+          type="button"
+          className="thought-segment-head"
+          onClick={() => toggleSegment(segment.session_id)}
+          aria-expanded={!isCollapsed}
+          title={segment.prompt || segment.text}
+        >
+          <span className="thought-segment-index">
+            {String(index + 1).padStart(2, "0")}
+          </span>
+          {showBadge && (
+            <SessionBadge
+              label={meta.name}
+              hue={meta.hue}
+              sessionId={segment.client_session}
+            />
+          )}
+          <span className="thought-segment-prompt">
+            {segment.prompt || "（未记录提问内容）"}
+          </span>
+          {isLive ? (
+            <span className="thought-segment-live" aria-label="思考中" />
+          ) : (
+            <span className="thought-segment-time">
+              {formatClock(segment.started_at)}
+            </span>
+          )}
+        </button>
+
+        {isCollapsed ? (
+          <div className="thought-segment-ticker-row">
+            <ThoughtTicker text={segment.text} />
+          </div>
+        ) : (
+          <>
+            <ThoughtBody text={segment.text} />
+            <div className="thought-segment-foot">
+              <span>{formatClock(segment.started_at)}</span>
+              {segment.ended_at != null && (
+                <span>
+                  {formatDuration(segment.started_at, segment.ended_at)}
+                </span>
+              )}
+              {segment.workdir && (
+                <span className="thought-segment-workdir" title={segment.workdir}>
+                  {basename(segment.workdir)}
+                </span>
+              )}
+              <span title={`ACP session ${segment.session_id}`}>
+                acp:{segment.session_id.slice(-6)}
+              </span>
+            </div>
+          </>
+        )}
+      </section>
+    );
+  };
 
   return (
     <div
@@ -485,7 +769,7 @@ export default function ThoughtsPage() {
               <button
                 type="button"
                 className={`thoughts-icon-btn${prefsOpen ? " is-active" : ""}`}
-                onClick={handleSkin}
+                onClick={handlePrefs}
                 title="外观"
                 aria-label="外观"
                 aria-expanded={prefsOpen}
@@ -500,28 +784,6 @@ export default function ThoughtsPage() {
                   role="dialog"
                   aria-label="外观设置"
                 >
-                  <div className="thoughts-prefs-row">
-                    <span className="thoughts-prefs-label">皮肤</span>
-                    <div className="thoughts-skins">
-                      {SKINS.map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          className={`thoughts-skin${
-                            item.id === skin.id ? " is-selected" : ""
-                          }`}
-                          onClick={() => handleSkinChange(item)}
-                          aria-pressed={item.id === skin.id}
-                        >
-                          <span
-                            className="thoughts-skin-dot"
-                            style={{ background: `rgb(${item.paper})` }}
-                          />
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
                   <div className="thoughts-prefs-row">
                     <span className="thoughts-prefs-label">透明度</span>
                     <input
@@ -564,6 +826,13 @@ export default function ThoughtsPage() {
 
         {collapsed ? (
           <div className="thoughts-collapsed">
+            {enabled && active && activeMeta && (
+              <SessionBadge
+                label={activeMeta.name}
+                hue={activeMeta.hue}
+                sessionId={active.client_session}
+              />
+            )}
             <RollingTicker text={tickerText} live={live} />
           </div>
         ) : !enabled ? (
@@ -589,71 +858,82 @@ export default function ThoughtsPage() {
             onScroll={handleScroll}
           >
             {segments.length > 0 ? (
-              segments.map((segment, index) => {
-                const isCollapsed = collapsedSegments.has(segment.session_id);
-                const isLive = segment.ended_at == null;
-                return (
-                  <section
-                    key={`${index}-${segment.session_id}`}
-                    className={`thought-segment${isLive ? " is-live" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      className="thought-segment-head"
-                      onClick={() => toggleSegment(segment.session_id)}
-                      aria-expanded={!isCollapsed}
-                      title={segment.prompt || segment.text}
+              grouped ? (
+                groups.map((group) => {
+                  const meta = groupMeta.get(group.key) ?? {
+                    name: "未标记会话",
+                    hint: "",
+                    hue: sessionHue(group.key),
+                  };
+                  const expanded = isGroupExpanded(group);
+                  const last = group.segments[group.segments.length - 1];
+                  return (
+                    <section
+                      key={group.key}
+                      className={`thought-group${group.live ? " is-live" : ""}`}
+                      style={
+                        { "--session-hue": String(meta.hue) } as CSSProperties
+                      }
+                      data-live-group={group.live ? "true" : undefined}
                     >
-                      <span className="thought-segment-index">
-                        {String(index + 1).padStart(2, "0")}
-                      </span>
-                      <span className="thought-segment-prompt">
-                        {segment.prompt || "（未记录提问内容）"}
-                      </span>
-                      {isLive ? (
-                        <span
-                          className="thought-segment-live"
-                          aria-label="思考中"
-                        />
-                      ) : (
-                        <span className="thought-segment-time">
-                          {formatClock(segment.started_at)}
+                      <button
+                        type="button"
+                        className="thought-group-head"
+                        onClick={() => toggleGroup(group)}
+                        aria-expanded={expanded}
+                        title={
+                          group.workdir
+                            ? `${meta.name} · ${group.workdir}`
+                            : meta.name
+                        }
+                      >
+                        <span className="thought-group-dot" aria-hidden="true" />
+                        <span className="thought-group-name">{meta.name}</span>
+                        {meta.hint && (
+                          <span className="thought-group-hint">{meta.hint}</span>
+                        )}
+                        <span className="thought-group-count">
+                          {group.segments.length} 轮
                         </span>
-                      )}
-                    </button>
+                        {group.live ? (
+                          <span
+                            className="thought-group-live"
+                            aria-label="思考中"
+                          />
+                        ) : (
+                          <span className="thought-group-time">
+                            {formatClock(group.lastActivity)}
+                          </span>
+                        )}
+                      </button>
 
-                    {isCollapsed ? (
-                      <div className="thought-segment-ticker-row">
-                        <ThoughtTicker text={segment.text} />
-                      </div>
-                    ) : (
-                      <>
-                        <pre className="thoughts-text">{segment.text}</pre>
-                        <div className="thought-segment-foot">
-                          <span>{formatClock(segment.started_at)}</span>
-                          {segment.ended_at != null && (
-                            <span>
-                              {formatDuration(
-                                segment.started_at,
-                                segment.ended_at,
-                              )}
-                            </span>
-                          )}
-                          {segment.workdir && (
-                            <span
-                              className="thought-segment-workdir"
-                              title={segment.workdir}
-                            >
-                              {basename(segment.workdir)}
-                            </span>
-                          )}
-                          <span>#{segment.session_id.slice(-6)}</span>
+                      {expanded ? (
+                        group.segments.map((segment, index) =>
+                          renderSegment(segment, meta, index, false),
+                        )
+                      ) : (
+                        <div
+                          className="thought-group-summary"
+                          title={last.prompt || undefined}
+                        >
+                          {promptHint(last.prompt) || "（未记录提问内容）"}
                         </div>
-                      </>
-                    )}
-                  </section>
-                );
-              })
+                      )}
+                    </section>
+                  );
+                })
+              ) : (
+                segments.map((segment, index) => {
+                  const meta = groupMeta.get(segmentKey(segment)) ?? {
+                    name: "未标记会话",
+                    hint: "",
+                    hue: sessionHue(segmentKey(segment)),
+                  };
+                  // One conversation fills the list, so the project tag reads as
+                  // a header for the stream instead of repeating on every turn.
+                  return renderSegment(segment, meta, index, index === 0);
+                })
+              )
             ) : (
               <div className="thoughts-empty-hint thoughts-viewer-empty">
                 等待思考输出…
@@ -668,7 +948,7 @@ export default function ThoughtsPage() {
             className="thoughts-follow"
             onClick={() => {
               setFollowing(true);
-              scrollToBottom();
+              scrollToLive();
             }}
           >
             ↓ 继续滚动

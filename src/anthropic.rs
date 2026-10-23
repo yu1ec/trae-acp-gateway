@@ -31,6 +31,16 @@ pub struct MessagesRequest {
     pub stream: bool,
     #[serde(default)]
     pub thinking: Option<Value>,
+    /// Anthropic request metadata. Claude Code reports its conversation id
+    /// here (`user_id` with a `_session_` suffix) in addition to the
+    /// `X-Claude-Code-Session-Id` header.
+    #[serde(default)]
+    pub metadata: Option<Value>,
+    /// Tool definitions the client sent. The gateway ignores them (the agent
+    /// runs its own tools), but they occupy the client's context window and
+    /// must be counted by the streamed usage estimate.
+    #[serde(default)]
+    pub tools: Option<Value>,
 }
 
 fn default_max_tokens() -> u64 {
@@ -140,6 +150,52 @@ fn usage_json(usage: Option<&Usage>) -> Value {
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": cached,
     })
+}
+
+/// Approximate the client-side input size for the streamed `message_start`.
+///
+/// Anthropic's streaming contract reports `input_tokens` on `message_start`,
+/// and the official SDK only refreshes `output_tokens` from `message_delta`
+/// (input/cache fields keep whatever `message_start` carried). The agent
+/// reports real usage only when the turn ends, so a zeroed `message_start`
+/// leaves clients showing `0 tokens` for the whole context. Estimate the
+/// request size instead; `message_delta` still carries the agent's exact
+/// numbers for clients that merge them (Claude Code does).
+fn estimate_input_tokens(req: &MessagesRequest) -> u64 {
+    fn count(text: &str) -> (u64, u64) {
+        let mut chars = 0u64;
+        let mut wide = 0u64;
+        for ch in text.chars() {
+            chars += 1;
+            if !ch.is_ascii() {
+                wide += 1;
+            }
+        }
+        (chars, wide)
+    }
+
+    let mut chars = 0u64;
+    let mut wide = 0u64;
+    let mut add = |text: &str| {
+        let (c, w) = count(text);
+        chars += c;
+        wide += w;
+    };
+    if let Some(system) = req.system_text() {
+        add(&system);
+    }
+    for message in &req.messages {
+        add(&text_from_content(&message.content));
+    }
+    if let Some(tools) = &req.tools
+        && let Ok(json) = serde_json::to_string(tools)
+    {
+        add(&json);
+    }
+    // Rough mixed-script rule of thumb: ~4 ASCII chars per token, ~1 token per
+    // non-ASCII char, plus per-message role framing.
+    let ascii = chars.saturating_sub(wide);
+    (ascii / 4 + wide + req.messages.len() as u64 * 4 + 8).max(1)
 }
 
 fn new_message_id() -> String {
@@ -336,12 +392,13 @@ pub async fn messages(
             )),
         ));
     }
+    let client_session = http::client_session(&headers, req.metadata.as_ref());
     if req.stream {
-        Ok(messages_stream(state, workdir, req, blocks)
+        Ok(messages_stream(state, workdir, client_session, req, blocks)
             .await
             .into_response())
     } else {
-        messages_buffered(state, workdir, req, blocks).await
+        messages_buffered(state, workdir, client_session, req, blocks).await
     }
 }
 
@@ -350,6 +407,7 @@ use axum::response::IntoResponse;
 async fn messages_buffered(
     state: AppState,
     workdir: String,
+    client_session: Option<String>,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -358,12 +416,18 @@ async fn messages_buffered(
     let thinking = req.thinking_enabled();
     let mut thought = String::new();
 
-    match http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
-        if let TurnEvent::Thought(t) = ev {
-            thought.push_str(t);
-        }
-        Ok(())
-    })
+    match http::run_turn_with_callback(
+        state.as_ref(),
+        &workdir,
+        client_session.as_deref(),
+        &blocks,
+        &mut |ev| {
+            if let TurnEvent::Thought(t) = ev {
+                thought.push_str(t);
+            }
+            Ok(())
+        },
+    )
     .await
     {
         Ok((_, outcome)) => {
@@ -391,12 +455,14 @@ async fn messages_buffered(
 async fn messages_stream(
     state: AppState,
     workdir: String,
+    client_session: Option<String>,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let id = new_message_id();
     let model = req.model.clone();
     let thinking = req.thinking_enabled();
+    let estimated_input_tokens = estimate_input_tokens(&req);
     // Unbounded on purpose: the turn callback is synchronous and cannot await
     // capacity. A bounded queue + try_send used to abort the whole turn
     // (killing the agent) whenever the client was briefly slow; one turn's
@@ -422,8 +488,8 @@ async fn messages_stream(
                 "stop_reason": null,
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
+                    "input_tokens": estimated_input_tokens,
+                    "output_tokens": 1,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 0,
                 },
@@ -436,17 +502,23 @@ async fn messages_stream(
 
         let mut blocks_out = BlockWriter::new();
 
-        let result = http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
-            let payloads = match ev {
-                TurnEvent::Thought(t) if thinking => blocks_out.push_thinking(t, &id),
-                TurnEvent::Thought(_) => Vec::new(),
-                TurnEvent::Message(t) => blocks_out.push_text(t, &id),
-            };
-            for payload in payloads {
-                send(sse_event(payload))?;
-            }
-            Ok(())
-        })
+        let result = http::run_turn_with_callback(
+            state.as_ref(),
+            &workdir,
+            client_session.as_deref(),
+            &blocks,
+            &mut |ev| {
+                let payloads = match ev {
+                    TurnEvent::Thought(t) if thinking => blocks_out.push_thinking(t, &id),
+                    TurnEvent::Thought(_) => Vec::new(),
+                    TurnEvent::Message(t) => blocks_out.push_text(t, &id),
+                };
+                for payload in payloads {
+                    send(sse_event(payload))?;
+                }
+                Ok(())
+            },
+        )
         .await;
 
         match result {
@@ -588,6 +660,34 @@ mod tests {
         assert_eq!(usage["output_tokens"], 0);
         assert_eq!(usage["cache_read_input_tokens"], 0);
         assert_eq!(usage["cache_creation_input_tokens"], 0);
+    }
+
+    #[test]
+    fn estimate_input_tokens_tracks_system_messages_and_tools() {
+        let small: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .unwrap();
+        let large: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "system": "s".repeat(4000),
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "a".repeat(4000) },
+            ],
+            "tools": [{ "name": "Bash", "description": "t".repeat(4000) }]
+        }))
+        .unwrap();
+        let small_tokens = estimate_input_tokens(&small);
+        let large_tokens = estimate_input_tokens(&large);
+        assert!(small_tokens > 0, "estimate must never be zero");
+        assert!(
+            large_tokens > small_tokens + 2500,
+            "large={large_tokens} small={small_tokens}"
+        );
     }
 
     #[test]

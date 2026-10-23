@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::ActivitySink;
 use crate::acp::Usage;
 use crate::agent::TurnEvent;
 use crate::config::Config;
@@ -53,6 +55,39 @@ pub struct GatewayState {
     pub responses: ResponseStore,
     /// Host-side side channel for reasoning chunks (desktop thought panel).
     pub thought_sink: Option<ThoughtSink>,
+    /// Turns currently being driven, shared with `activity_sink`.
+    pub activity: Arc<AtomicUsize>,
+    /// Host-side side channel for busy/idle transitions (desktop tray icon).
+    pub activity_sink: Option<ActivitySink>,
+}
+
+/// RAII marker for one in-flight ACP turn. Dropping it always decrements the
+/// counter, including when a gateway shutdown drops the turn future.
+pub struct ActivityGuard<'a> {
+    state: &'a GatewayState,
+}
+
+impl GatewayState {
+    pub fn begin_activity(&self) -> ActivityGuard<'_> {
+        let count = self.activity.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(sink) = &self.activity_sink {
+            sink(count);
+        }
+        ActivityGuard { state: self }
+    }
+}
+
+impl Drop for ActivityGuard<'_> {
+    fn drop(&mut self) {
+        let count = self
+            .state
+            .activity
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if let Some(sink) = &self.state.activity_sink {
+            sink(count);
+        }
+    }
 }
 
 pub type SharedState = Arc<GatewayState>;
@@ -222,18 +257,22 @@ pub async fn create_response(
             Json(error_response("input must not be empty", 400)),
         ));
     }
+    let client_session = http::client_session(&headers, req.metadata.as_ref());
     if req.stream {
-        Ok(responses_stream(state, workdir, req, blocks)
-            .await
-            .into_response())
+        Ok(
+            responses_stream(state, workdir, client_session, req, blocks)
+                .await
+                .into_response(),
+        )
     } else {
-        responses_buffered(state, workdir, req, blocks).await
+        responses_buffered(state, workdir, client_session, req, blocks).await
     }
 }
 
 async fn responses_buffered(
     state: SharedState,
     workdir: String,
+    client_session: Option<String>,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -247,7 +286,7 @@ async fn responses_buffered(
         .map(|s| s.transcript.clone())
         .unwrap_or_default();
 
-    match http::run_turn(state.as_ref(), &workdir, &blocks).await {
+    match http::run_turn(state.as_ref(), &workdir, client_session.as_deref(), &blocks).await {
         Ok((_, outcome)) => {
             let body = build_response(&id, &model, &outcome.text, outcome.usage.as_ref());
             let transcript = format!(
@@ -271,6 +310,7 @@ async fn responses_buffered(
 async fn responses_stream(
     state: SharedState,
     workdir: String,
+    client_session: Option<String>,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -335,23 +375,29 @@ async fn responses_stream(
         );
 
         let mut text_buf = String::new();
-        let result = http::run_turn_with_callback(&cfg, &workdir, &blocks, &mut |ev| {
-            if let TurnEvent::Message(t) = ev {
-                text_buf.push_str(t);
-                let _ = send(
-                    Event::default().event("response.output_text.delta").data(
-                        json!({
-                            "type": "response.output_text.delta",
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": t,
-                        })
-                        .to_string(),
-                    ),
-                );
-            }
-            Ok(())
-        })
+        let result = http::run_turn_with_callback(
+            &cfg,
+            &workdir,
+            client_session.as_deref(),
+            &blocks,
+            &mut |ev| {
+                if let TurnEvent::Message(t) = ev {
+                    text_buf.push_str(t);
+                    let _ = send(
+                        Event::default().event("response.output_text.delta").data(
+                            json!({
+                                "type": "response.output_text.delta",
+                                "output_index": 0,
+                                "content_index": 0,
+                                "delta": t,
+                            })
+                            .to_string(),
+                        ),
+                    );
+                }
+                Ok(())
+            },
+        )
         .await;
 
         match result {

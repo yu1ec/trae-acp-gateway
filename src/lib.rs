@@ -30,6 +30,11 @@ pub use update::{
     cli_asset_name, download_to_temp, download_with_mirrors, notify_update_available,
 };
 
+/// Host-side hook reporting the number of ACP turns currently in flight. It is
+/// called with the new count whenever a turn starts or finishes, so a host can
+/// render a "communicating" indicator.
+pub type ActivitySink = Arc<dyn Fn(usize) + Send + Sync>;
+
 pub type AppState = Arc<GatewayState>;
 
 pub fn router(state: AppState) -> Router {
@@ -61,14 +66,16 @@ pub async fn bind_localhost(port: u16) -> anyhow::Result<tokio::net::TcpListener
 /// Returns the task handle and the port actually bound (`cfg.port`, or the
 /// OS-assigned port when `cfg.port` is 0).
 pub async fn serve(cfg: Arc<Config>) -> anyhow::Result<(tokio::task::JoinHandle<()>, u16)> {
-    serve_with_thoughts(cfg, None).await
+    serve_with_thoughts(cfg, None, None).await
 }
 
-/// Like [`serve`], but forwards ACP reasoning chunks to `thought_sink`.
-/// The CLI and any headless user keeps using [`serve`].
+/// Like [`serve`], but forwards ACP reasoning chunks to `thought_sink` and
+/// in-flight turn counts to `activity_sink`. The CLI and any headless user
+/// keeps using [`serve`].
 pub async fn serve_with_thoughts(
     cfg: Arc<Config>,
     thought_sink: Option<ThoughtSink>,
+    activity_sink: Option<ActivitySink>,
 ) -> anyhow::Result<(tokio::task::JoinHandle<()>, u16)> {
     let listener = bind_localhost(cfg.port)
         .await
@@ -80,6 +87,8 @@ pub async fn serve_with_thoughts(
         config: cfg.clone(),
         responses: ResponseStore::default(),
         thought_sink,
+        activity: Default::default(),
+        activity_sink,
     });
     let app = router(state);
     let handle = tokio::spawn(async move {

@@ -148,6 +148,90 @@ fn extract_models(session_new_result: &Value) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// UI notice the agent harness injects into its assistant text after an
+/// automatic context compaction. It is chrome, not model output: forwarding it
+/// makes the client treat it as something the model said, store it in history,
+/// and send it back on the next turn, where it accumulates.
+const COMPACTED_NOTICE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
+
+/// Removes [`COMPACTED_NOTICE`] (and the `Context compacted` marker glued in
+/// front of it) from a streamed assistant message.
+///
+/// Chunk boundaries are arbitrary, so the tail of every chunk that could be a
+/// prefix of a notice is held back until the next chunk either completes or
+/// rules it out. Only a partial match is buffered, so ordinary text streams
+/// through without added latency.
+struct HarnessFilter {
+    /// Full strings to delete, longest/most specific first is not required:
+    /// the earliest occurrence wins and the combined form starts before the
+    /// bare notice.
+    markers: Vec<String>,
+    pending: String,
+}
+
+impl HarnessFilter {
+    fn new() -> Self {
+        let mut markers = vec![
+            format!("Context compacted\n{COMPACTED_NOTICE}"),
+            format!("Context compacted\r\n{COMPACTED_NOTICE}"),
+            format!("Context compacted {COMPACTED_NOTICE}"),
+        ];
+        markers.push(COMPACTED_NOTICE.to_string());
+        Self {
+            markers,
+            pending: String::new(),
+        }
+    }
+
+    /// Feed one chunk, return the text that is now safe to forward.
+    fn push(&mut self, chunk: &str) -> String {
+        self.pending.push_str(chunk);
+        let mut out = String::new();
+        loop {
+            let found = self
+                .markers
+                .iter()
+                .filter_map(|m| self.pending.find(m.as_str()).map(|i| (i, m.len())))
+                .min_by_key(|(i, _)| *i);
+            let safe = self.pending.len() - self.held_suffix_len();
+            match found {
+                Some((idx, len)) if idx <= safe => {
+                    out.push_str(&self.pending[..idx]);
+                    self.pending.drain(..idx + len);
+                }
+                _ => {
+                    out.push_str(&self.pending[..safe]);
+                    self.pending.drain(..safe);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Emit whatever is still buffered at end of turn.
+    fn flush(&mut self) -> String {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Length of the longest suffix of `pending` that is a proper prefix of a
+    /// marker — exactly what a notice split across chunks looks like.
+    fn held_suffix_len(&self) -> usize {
+        let longest = self.markers.iter().map(String::len).max().unwrap_or(0);
+        let max = self.pending.len().min(longest.saturating_sub(1));
+        (1..=max)
+            .rev()
+            .find(|&k| {
+                self.pending.is_char_boundary(self.pending.len() - k)
+                    && self
+                        .markers
+                        .iter()
+                        .any(|m| m.starts_with(&self.pending[self.pending.len() - k..]))
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// One ACP connection = one spawned agent process = one HTTP request's lifetime.
 pub struct AgentProcess {
     child: tokio::process::Child,
@@ -343,10 +427,11 @@ impl AgentProcess {
             .await?;
 
         let mut text_out = String::new();
+        let mut filter = HarnessFilter::new();
         // Updates that arrived before this call (shouldn't happen, but order
         // is order): they belong to this conversation's stream.
         for u in std::mem::take(&mut self.queued_updates) {
-            Self::handle_live(u, &mut text_out, on_event)?;
+            Self::handle_live(u, &mut text_out, &mut filter, on_event)?;
         }
 
         loop {
@@ -356,7 +441,7 @@ impl AgentProcess {
                 .await
                 .context("agent connection closed mid-turn")?
             {
-                Event::Update(u) => Self::handle_live(u, &mut text_out, on_event)?,
+                Event::Update(u) => Self::handle_live(u, &mut text_out, &mut filter, on_event)?,
                 Event::AgentRequest(req_id, req_method, req_params) => {
                     let result = policy.answer(&req_method, &req_params);
                     self.reply(req_id, result).await?;
@@ -364,6 +449,11 @@ impl AgentProcess {
                 Event::Response(resp_id, payload) => {
                     if resp_id != prompt_id {
                         bail!("prompt response id mismatch: got {resp_id:?}, want {prompt_id:?}");
+                    }
+                    let tail = filter.flush();
+                    if !tail.is_empty() {
+                        text_out.push_str(&tail);
+                        on_event(TurnEvent::Message(&tail))?;
                     }
                     let resp: PromptResponse =
                         serde_json::from_value(payload.map_err(|e| {
@@ -384,15 +474,21 @@ impl AgentProcess {
     }
 
     /// One update: append message text, stream chunks through `on_event`.
+    /// Harness chrome is stripped before either the accumulator or the client
+    /// sees it.
     fn handle_live(
         update: Update,
         text_out: &mut String,
+        filter: &mut HarnessFilter,
         on_event: TurnCallback<'_>,
     ) -> anyhow::Result<()> {
         match update {
             Update::AgentMessageChunk { content } if content.r#type == "text" => {
-                text_out.push_str(&content.text);
-                on_event(TurnEvent::Message(&content.text))?;
+                let text = filter.push(&content.text);
+                if !text.is_empty() {
+                    text_out.push_str(&text);
+                    on_event(TurnEvent::Message(&text))?;
+                }
             }
             Update::AgentThoughtChunk { content } if content.r#type == "text" => {
                 on_event(TurnEvent::Thought(&content.text))?;
@@ -421,8 +517,79 @@ impl AgentProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{Policy, extract_models};
+    use super::{COMPACTED_NOTICE, HarnessFilter, Policy, extract_models};
     use serde_json::{Value, json};
+
+    fn run_filter(chunks: &[&str]) -> String {
+        let mut filter = HarnessFilter::new();
+        let mut out = String::new();
+        for chunk in chunks {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.flush());
+        out
+    }
+
+    fn combined_notice() -> String {
+        format!("Context compacted\n{COMPACTED_NOTICE}")
+    }
+
+    #[test]
+    fn removes_compaction_notice_split_at_every_boundary() {
+        let notice = combined_notice();
+        let text = format!("先看一下现有代码。{notice}已完成改造。");
+        for split in 1..text.len() {
+            if !text.is_char_boundary(split) {
+                continue;
+            }
+            let cleaned = run_filter(&[&text[..split], &text[split..]]);
+            assert_eq!(cleaned, "先看一下现有代码。已完成改造。", "split={split}");
+        }
+    }
+
+    #[test]
+    fn removes_repeated_notices() {
+        let notice = combined_notice();
+        let text = format!("{notice}{notice}answer");
+        assert_eq!(run_filter(&[&text]), "answer");
+    }
+
+    #[test]
+    fn removes_bare_notice_and_space_variant() {
+        assert_eq!(run_filter(&[COMPACTED_NOTICE]), "");
+        assert_eq!(
+            run_filter(&[&format!("Context compacted {COMPACTED_NOTICE}")]),
+            ""
+        );
+        assert_eq!(
+            run_filter(&[&format!("Context compacted\r\n{COMPACTED_NOTICE}")]),
+            ""
+        );
+    }
+
+    #[test]
+    fn streams_ordinary_text_eagerly() {
+        let mut filter = HarnessFilter::new();
+        assert_eq!(filter.push("hello world"), "hello world");
+        assert!(filter.pending.is_empty());
+    }
+
+    #[test]
+    fn holds_only_a_partial_marker_until_disambiguated() {
+        let mut filter = HarnessFilter::new();
+        // Ends with a prefix of "Context compacted": held, not dropped.
+        assert_eq!(filter.push("done. Context comp"), "done. ");
+        let rest = format!("acted\n{COMPACTED_NOTICE}!");
+        let mut out = filter.push(&rest);
+        out.push_str(&filter.flush());
+        assert_eq!(out, "!");
+    }
+
+    #[test]
+    fn keeps_text_that_only_resembles_a_marker() {
+        let text = "Context compacted the cache, so it was faster.";
+        assert_eq!(run_filter(&[text]), text);
+    }
 
     fn perm_request(options: Value) -> Value {
         json!({

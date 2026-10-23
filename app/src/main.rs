@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,8 +12,9 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
-    CURRENT_VERSION, Config as GatewayConfig, ThoughtSink, ThoughtUpdate, canonicalize_workdir,
-    default_workdir_root, ensure_workdir, is_legacy_workdir, serve_with_thoughts, user_home_dir,
+    ActivitySink, CURRENT_VERSION, Config as GatewayConfig, ThoughtSink, ThoughtUpdate,
+    canonicalize_workdir, default_workdir_root, ensure_workdir, is_legacy_workdir,
+    serve_with_thoughts, user_home_dir,
 };
 
 mod update;
@@ -116,8 +117,7 @@ fn load_config_from_file(path: &std::path::Path) -> AppConfig {
 /// Path that older versions wrote as the implicit default.
 fn is_old_default_workdir(workdir: &str) -> bool {
     user_home_dir().is_some_and(|home| {
-        std::path::Path::new(workdir.trim())
-            == std::path::Path::new(&home).join("trae-acp-gateway")
+        std::path::Path::new(workdir.trim()) == std::path::Path::new(&home).join("trae-acp-gateway")
     })
 }
 
@@ -213,7 +213,11 @@ fn now_ms() -> u64 {
 /// its own block so turns from different requests stay distinguishable.
 #[derive(Serialize, Clone)]
 struct ThoughtSegment {
+    /// ACP session id; unique per turn, used only to match deltas.
     session_id: String,
+    /// The client's conversation id, carried across turns of the same
+    /// conversation so the panel can attribute interleaved sessions.
+    client_session: Option<String>,
     workdir: String,
     started_at: u64,
     ended_at: Option<u64>,
@@ -258,10 +262,12 @@ impl ThoughtBuffer {
         match update {
             ThoughtUpdate::Start {
                 session_id,
+                client_session,
                 workdir,
                 prompt,
             } => {
                 let segment = Self::segment_mut(&mut inner, &session_id, &workdir, now);
+                segment.client_session = client_session;
                 segment.prompt = prompt;
             }
             ThoughtUpdate::Delta { session_id, text } => {
@@ -301,6 +307,7 @@ impl ThoughtBuffer {
         }
         inner.segments.push_back(ThoughtSegment {
             session_id: session_id.to_string(),
+            client_session: None,
             workdir: workdir.to_string(),
             started_at: now,
             ended_at: None,
@@ -366,6 +373,8 @@ struct AppState {
     generation: AtomicU64,
     logs: Arc<LogBuffer>,
     thoughts: Arc<ThoughtBuffer>,
+    /// ACP turns currently in flight; drives the tray animation.
+    activity: Arc<AtomicUsize>,
     log_reload: LogFilterReload,
     tray_status: Mutex<Option<MenuItem<tauri::Wry>>>,
     tray_toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
@@ -398,6 +407,9 @@ async fn stop(state: &AppState) -> bool {
     // Invalidate the watcher first so an intentional stop is not reported as
     // a crash.
     state.generation.fetch_add(1, Ordering::SeqCst);
+    // Turn guards are dropped when the gateway task is aborted; reset here as
+    // well so a straggling update cannot leave the tray animation running.
+    state.activity.store(0, Ordering::Relaxed);
     let handle = state.handle.lock().unwrap().take();
     match handle {
         Some(handle) => {
@@ -428,6 +440,7 @@ fn watch_gateway(app: AppHandle, generation: u64) {
                 .unwrap_or(false);
             if crashed {
                 *state.handle.lock().unwrap() = None;
+                state.activity.store(0, Ordering::Relaxed);
                 update_tray(&app);
                 notify_error(&app, "Gateway 已停止", "服务意外退出，请查看日志");
                 tracing::error!("gateway exited unexpectedly");
@@ -441,13 +454,18 @@ async fn start(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if is_running(state) {
         return Ok(());
     }
+    state.activity.store(0, Ordering::Relaxed);
     let mut gcfg = to_gateway(&state.cfg.lock().unwrap());
     canonicalize_workdir(&mut gcfg).map_err(|e| e.to_string())?;
     let sink: ThoughtSink = {
         let thoughts = state.thoughts.clone();
         Arc::new(move |update| thoughts.push(update))
     };
-    let (handle, _port) = serve_with_thoughts(Arc::new(gcfg), Some(sink))
+    let activity_sink: ActivitySink = {
+        let activity = state.activity.clone();
+        Arc::new(move |count| activity.store(count, Ordering::Relaxed))
+    };
+    let (handle, _port) = serve_with_thoughts(Arc::new(gcfg), Some(sink), Some(activity_sink))
         .await
         .map_err(|e| e.to_string())?;
     *state.handle.lock().unwrap() = Some(handle);
@@ -475,6 +493,70 @@ fn update_tray(app: &AppHandle) {
             "Start Gateway"
         });
     }
+}
+
+/// Thinking-dots frames shown while the gateway is talking to the agent.
+const TRAY_BUSY_FRAMES: &[&[u8]] = &[
+    include_bytes!("../icons/tray-busy-1.png"),
+    include_bytes!("../icons/tray-busy-2.png"),
+    include_bytes!("../icons/tray-busy-3.png"),
+    include_bytes!("../icons/tray-busy-4.png"),
+    include_bytes!("../icons/tray-busy-5.png"),
+    include_bytes!("../icons/tray-busy-6.png"),
+    include_bytes!("../icons/tray-busy-7.png"),
+    include_bytes!("../icons/tray-busy-8.png"),
+];
+
+const TRAY_FRAME_INTERVAL: Duration = Duration::from_millis(120);
+
+/// Tray icon colour for `tauri dev` builds: amber instead of the release green,
+/// so a locally running instance is obvious in the menu bar.
+const TRAY_DEV_COLOR: [u8; 3] = [0xFF, 0x9F, 0x0A];
+
+/// Decode a tray PNG, recolouring it in debug builds while keeping the alpha
+/// channel (and therefore the antialiased edges) intact.
+fn tray_image(bytes: &[u8]) -> tauri::image::Image<'static> {
+    let image = tauri::image::Image::from_bytes(bytes).expect("tray icon is valid PNG");
+    if !cfg!(debug_assertions) {
+        return image.to_owned();
+    }
+    let mut rgba = image.rgba().to_vec();
+    for px in rgba.chunks_exact_mut(4) {
+        if px[3] != 0 {
+            px[..3].copy_from_slice(&TRAY_DEV_COLOR);
+        }
+    }
+    tauri::image::Image::new_owned(rgba, image.width(), image.height())
+}
+
+/// Swap the tray icon for a thinking-dots variant while any ACP turn is in
+/// flight, and restore the static icon once the gateway goes quiet.
+fn spawn_tray_animation(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let idle = tray_image(include_bytes!("../icons/tray-icon.png"));
+        let frames: Vec<_> = TRAY_BUSY_FRAMES
+            .iter()
+            .map(|bytes| tray_image(bytes))
+            .collect();
+        let mut next_frame = 0;
+        let mut was_busy = false;
+        let activity = app.state::<AppState>().activity.clone();
+        loop {
+            tokio::time::sleep(TRAY_FRAME_INTERVAL).await;
+            let busy = activity.load(Ordering::Relaxed) > 0;
+            let Some(tray) = app.tray_by_id("main") else {
+                continue;
+            };
+            if busy {
+                let _ = tray.set_icon(Some(frames[next_frame].clone()));
+                next_frame = (next_frame + 1) % frames.len();
+            } else if was_busy {
+                let _ = tray.set_icon(Some(idle.clone()));
+                next_frame = 0;
+            }
+            was_busy = busy;
+        }
+    });
 }
 
 fn open_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) {
@@ -980,9 +1062,7 @@ fn main() {
                 ],
             )?;
 
-            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
-                .expect("tray icon is valid PNG")
-                .to_owned();
+            let icon = tray_image(include_bytes!("../icons/tray-icon.png"));
             TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(false)
@@ -1020,10 +1100,13 @@ fn main() {
                 generation: AtomicU64::new(0),
                 logs: logs.clone(),
                 thoughts: thoughts.clone(),
+                activity: Arc::new(AtomicUsize::new(0)),
                 log_reload: log_reload.clone(),
                 tray_status: Mutex::new(Some(status)),
                 tray_toggle: Mutex::new(Some(toggle)),
             });
+
+            spawn_tray_animation(app.handle().clone());
 
             let _ = app.notification().request_permission();
 
@@ -1063,6 +1146,7 @@ mod thought_tests {
         let buffer = ThoughtBuffer::new(true);
         buffer.push(ThoughtUpdate::Start {
             session_id: "session-a".into(),
+            client_session: Some("client-a".into()),
             workdir: "/work/a".into(),
             prompt: "first question".into(),
         });
@@ -1072,6 +1156,7 @@ mod thought_tests {
         });
         buffer.push(ThoughtUpdate::Start {
             session_id: "session-b".into(),
+            client_session: Some("client-b".into()),
             workdir: "/work/b".into(),
             prompt: "second question".into(),
         });
@@ -1088,9 +1173,17 @@ mod thought_tests {
         assert_eq!(snapshot.segments[0].text, "first");
         assert_eq!(snapshot.segments[0].workdir, "/work/a");
         assert_eq!(snapshot.segments[0].prompt, "first question");
+        assert_eq!(
+            snapshot.segments[0].client_session.as_deref(),
+            Some("client-a")
+        );
         assert!(snapshot.segments[0].ended_at.is_some());
         assert_eq!(snapshot.segments[1].text, "second");
         assert_eq!(snapshot.segments[1].prompt, "second question");
+        assert_eq!(
+            snapshot.segments[1].client_session.as_deref(),
+            Some("client-b")
+        );
         assert!(snapshot.segments[1].ended_at.is_none());
     }
 }

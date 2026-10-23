@@ -21,6 +21,57 @@ use crate::openai_responses::GatewayState;
 use crate::prompt::PromptBlock;
 use crate::thought::ThoughtUpdate;
 
+/// Headers a client may use to report its own conversation id.
+///
+/// Claude Code sends `X-Claude-Code-Session-Id` on every request; the generic
+/// aliases let other clients opt in. Same value across turns = same
+/// conversation, which is what lets the thought panel separate interleaved
+/// sessions (one gateway request is exactly one turn, so the ACP session id
+/// changes every time and cannot fill this role).
+const SESSION_HEADERS: &[&str] = &[
+    "x-claude-code-session-id",
+    "x-session-id",
+    "x-conversation-id",
+];
+
+/// Resolve the caller's conversation id from headers, then from known body
+/// metadata shapes. Returns `None` when the client reports nothing; the panel
+/// then shows an explicit "unmarked" badge instead of merging unrelated turns.
+pub fn client_session(headers: &HeaderMap, metadata: Option<&Value>) -> Option<String> {
+    for name in SESSION_HEADERS {
+        if let Some(value) = headers.get(*name).and_then(|v| v.to_str().ok()) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    let metadata = metadata?;
+    for key in [
+        "session_id",
+        "sessionId",
+        "conversation_id",
+        "conversationId",
+    ] {
+        if let Some(value) = metadata.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    // Claude Code's older clients embed the session UUID in
+    // `metadata.user_id` as `user_<hash>_account_<id>_session_<uuid>`. Only
+    // keep the session part: the rest is account-scoped and would merge
+    // unrelated conversations.
+    let user_id = metadata.get("user_id").and_then(Value::as_str)?;
+    user_id
+        .split_once("_session_")
+        .map(|(_, session)| session.trim())
+        .filter(|session| !session.is_empty())
+        .map(str::to_string)
+}
+
 /// Resolve the workdir for one request.
 pub fn resolve_workdir(
     cfg: &GatewayState,
@@ -57,9 +108,10 @@ pub fn resolve_workdir(
 pub async fn run_turn(
     cfg: &GatewayState,
     workdir: &str,
+    client_session: Option<&str>,
     blocks: &[PromptBlock],
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
-    run_turn_with_callback(cfg, workdir, blocks, &mut |_| Ok(())).await
+    run_turn_with_callback(cfg, workdir, client_session, blocks, &mut |_| Ok(())).await
 }
 
 /// Best-effort one-line hint of what this turn asked for, shown as the
@@ -94,10 +146,14 @@ fn last_user_turn(text: &str) -> Option<&str> {
 pub async fn run_turn_with_callback(
     cfg: &GatewayState,
     workdir: &str,
+    client_session: Option<&str>,
     blocks: &[PromptBlock],
     on_event: &mut (dyn FnMut(TurnEvent<'_>) -> anyhow::Result<()> + Send),
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
     let c = &cfg.config;
+    // Hold the busy marker for the whole turn so the host's tray indicator
+    // covers buffered and streaming responses alike.
+    let _activity = cfg.begin_activity();
     let policy = if c.sandbox {
         Policy::Sandbox
     } else {
@@ -111,6 +167,7 @@ pub async fn run_turn_with_callback(
     // `thinking` flag: the panel always sees the real ACP stream.
     let sink = cfg.thought_sink.clone();
     let prompt = prompt_hint(blocks);
+    let client_session = client_session.map(str::to_string);
     let mut thought_started = false;
     // Kept outside the async block so the panel still gets an `End` when the
     // turn fails after its first reasoning chunk.
@@ -125,6 +182,7 @@ pub async fn run_turn_with_callback(
                     if !thought_started {
                         sink(ThoughtUpdate::Start {
                             session_id: session_id.clone(),
+                            client_session: client_session.clone(),
                             workdir: workdir.to_string(),
                             prompt: prompt.clone(),
                         });
@@ -155,6 +213,7 @@ pub async fn run_turn_with_callback(
 
 /// Spawn the agent and create one session just to learn which models it exposes.
 pub async fn discover_models(cfg: &GatewayState) -> anyhow::Result<Vec<crate::agent::ModelInfo>> {
+    let _activity = cfg.begin_activity();
     let c = &cfg.config;
     let mut agent = AgentProcess::spawn(&c.trae_cmd, &c.trae_args, &c.workdir).await?;
     let result = agent.new_session(&c.workdir).await.map(|info| info.models);
@@ -206,6 +265,7 @@ pub async fn chat_completions(
             )
         })?;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
+    let client_session = client_session(&headers, None);
     let completion_id = new_completion_id();
 
     // Unbounded on purpose: the turn callback is synchronous, so it cannot
@@ -232,29 +292,35 @@ pub async fn chat_completions(
 
             let completion_id = completion_id.clone();
             let mut client_gone = false;
-            let turn = run_turn_with_callback(&cfg, &workdir, &blocks, &mut |ev| {
-                let ev = match ev {
-                    TurnEvent::Message(text) => chat_chunk(
-                        &completion_id,
-                        serde_json::json!({ "content": text }),
-                        None,
-                        None,
-                    ),
-                    TurnEvent::Thought(text) => chat_chunk(
-                        &completion_id,
-                        serde_json::json!({ "reasoning_content": text }),
-                        None,
-                        None,
-                    ),
-                };
-                match tx.send(Ok(Event::default().data(ev.to_string()))) {
-                    Ok(()) => Ok(()),
-                    Err(_) => {
-                        client_gone = true;
-                        anyhow::bail!("client disconnected mid-turn")
+            let turn = run_turn_with_callback(
+                &cfg,
+                &workdir,
+                client_session.as_deref(),
+                &blocks,
+                &mut |ev| {
+                    let ev = match ev {
+                        TurnEvent::Message(text) => chat_chunk(
+                            &completion_id,
+                            serde_json::json!({ "content": text }),
+                            None,
+                            None,
+                        ),
+                        TurnEvent::Thought(text) => chat_chunk(
+                            &completion_id,
+                            serde_json::json!({ "reasoning_content": text }),
+                            None,
+                            None,
+                        ),
+                    };
+                    match tx.send(Ok(Event::default().data(ev.to_string()))) {
+                        Ok(()) => Ok(()),
+                        Err(_) => {
+                            client_gone = true;
+                            anyhow::bail!("client disconnected mid-turn")
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
             if client_gone {
                 anyhow::bail!("client disconnected mid-turn");
@@ -308,9 +374,10 @@ pub async fn chat_completions_buffered(
             )
         })?;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
+    let client_session = client_session(&headers, None);
     let completion_id = new_completion_id();
 
-    match run_turn(&state, &workdir, &blocks).await {
+    match run_turn(&state, &workdir, client_session.as_deref(), &blocks).await {
         Ok((_, outcome)) => Ok(Json(chat_response(
             &completion_id,
             &outcome.text,
@@ -324,5 +391,54 @@ pub async fn chat_completions_buffered(
                 Json(error_response(&e.to_string(), 500)),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn client_session_reads_claude_code_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_static("01a1667d-f926-7270-ade5-4b4ef94a9829"),
+        );
+        assert_eq!(
+            client_session(&headers, None).as_deref(),
+            Some("01a1667d-f926-7270-ade5-4b4ef94a9829")
+        );
+    }
+
+    #[test]
+    fn client_session_falls_back_to_metadata() {
+        let headers = HeaderMap::new();
+        let metadata = serde_json::json!({ "session_id": "conversation-7" });
+        assert_eq!(
+            client_session(&headers, Some(&metadata)).as_deref(),
+            Some("conversation-7")
+        );
+    }
+
+    #[test]
+    fn client_session_extracts_claude_user_id_suffix() {
+        let headers = HeaderMap::new();
+        let metadata = serde_json::json!({
+            "user_id": "user_abc_account_def_session_01a1667d-f926-7270"
+        });
+        assert_eq!(
+            client_session(&headers, Some(&metadata)).as_deref(),
+            Some("01a1667d-f926-7270")
+        );
+    }
+
+    #[test]
+    fn client_session_is_none_without_ids() {
+        let headers = HeaderMap::new();
+        let metadata = serde_json::json!({ "user_id": "user_abc_account_def" });
+        assert_eq!(client_session(&headers, Some(&metadata)), None);
+        assert_eq!(client_session(&headers, None), None);
     }
 }

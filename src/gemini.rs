@@ -204,13 +204,20 @@ pub async fn generate_content(
             Json(gemini_error("contents must not be empty", 400)),
         ));
     }
+    let client_session = http::client_session(&headers, None);
     let mut thought = String::new();
-    match http::run_turn_with_callback(state.as_ref(), &workdir, &blocks, &mut |ev| {
-        if let TurnEvent::Thought(t) = ev {
-            thought.push_str(t);
-        }
-        Ok(())
-    })
+    match http::run_turn_with_callback(
+        state.as_ref(),
+        &workdir,
+        client_session.as_deref(),
+        &blocks,
+        &mut |ev| {
+            if let TurnEvent::Thought(t) = ev {
+                thought.push_str(t);
+            }
+            Ok(())
+        },
+    )
     .await
     {
         Ok((_, outcome)) => {
@@ -256,21 +263,28 @@ pub async fn stream_generate_content(
 
     // Unbounded: the turn callback is synchronous and cannot await capacity,
     // and a bounded try_send silently dropped output when the client lagged.
+    let client_session = http::client_session(&headers, None);
     let (tx, rx) = mpsc::unbounded_channel();
     let cfg = state.clone();
     tokio::spawn(async move {
         let send = |data: Value| tx.send(Ok(Event::default().data(data.to_string())));
-        let result = http::run_turn_with_callback(cfg.as_ref(), &workdir, &blocks, &mut |ev| {
-            match ev {
-                TurnEvent::Thought(t) => {
-                    let _ = send(stream_chunk(t, true));
+        let result = http::run_turn_with_callback(
+            cfg.as_ref(),
+            &workdir,
+            client_session.as_deref(),
+            &blocks,
+            &mut |ev| {
+                match ev {
+                    TurnEvent::Thought(t) => {
+                        let _ = send(stream_chunk(t, true));
+                    }
+                    TurnEvent::Message(t) => {
+                        let _ = send(stream_chunk(t, false));
+                    }
                 }
-                TurnEvent::Message(t) => {
-                    let _ = send(stream_chunk(t, false));
-                }
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .await;
         if let Err(e) = result {
             tracing::error!(error = %e, "gemini stream failed");

@@ -17,8 +17,14 @@ use std::sync::Arc;
 pub enum ThoughtUpdate {
     /// A prompt turn started; a new thought stream follows. `prompt` is the
     /// user's question for this turn, for the panel's per-segment title.
+    ///
+    /// `client_session` is the caller's conversation id, when the request
+    /// carried one. `session_id` is unique per turn and cannot identify the
+    /// conversation, so the panel uses `client_session` to attribute
+    /// interleaved turns from concurrent clients.
     Start {
         session_id: String,
+        client_session: Option<String>,
         workdir: String,
         prompt: String,
     },
