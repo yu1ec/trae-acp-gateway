@@ -280,7 +280,7 @@ export default function SettingsPage() {
           打开思考面板
         </button>
         <span className="settings-hint">
-          悬浮显示 ACP 思考流，可搜索、清除并实时调整透明度
+          悬浮显示 ACP 思考流
         </span>
       </div>
 
