@@ -250,6 +250,8 @@ pub async fn create_response(
                 Json(error_response(&format!("invalid workdir: {e}"), 400)),
             )
         })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = req.to_prompt_blocks(&state.responses);
     if blocks.is_empty() {
         return Err((
@@ -259,19 +261,33 @@ pub async fn create_response(
     }
     let client_session = http::client_session(&headers, req.metadata.as_ref());
     if req.stream {
-        Ok(
-            responses_stream(state, workdir, client_session, req, blocks)
-                .await
-                .into_response(),
+        Ok(responses_stream(
+            state,
+            workdir,
+            workdir_reported,
+            client_session,
+            req,
+            blocks,
         )
+        .await
+        .into_response())
     } else {
-        responses_buffered(state, workdir, client_session, req, blocks).await
+        responses_buffered(
+            state,
+            workdir,
+            workdir_reported,
+            client_session,
+            req,
+            blocks,
+        )
+        .await
     }
 }
 
 async fn responses_buffered(
     state: SharedState,
     workdir: String,
+    workdir_reported: bool,
     client_session: Option<String>,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
@@ -286,7 +302,15 @@ async fn responses_buffered(
         .map(|s| s.transcript.clone())
         .unwrap_or_default();
 
-    match http::run_turn(state.as_ref(), &workdir, client_session.as_deref(), &blocks).await {
+    match http::run_turn(
+        state.as_ref(),
+        &workdir,
+        workdir_reported,
+        client_session.as_deref(),
+        &blocks,
+    )
+    .await
+    {
         Ok((_, outcome)) => {
             let body = build_response(&id, &model, &outcome.text, outcome.usage.as_ref());
             let transcript = format!(
@@ -310,6 +334,7 @@ async fn responses_buffered(
 async fn responses_stream(
     state: SharedState,
     workdir: String,
+    workdir_reported: bool,
     client_session: Option<String>,
     req: ResponsesRequest,
     blocks: Vec<PromptBlock>,
@@ -378,6 +403,7 @@ async fn responses_stream(
         let result = http::run_turn_with_callback(
             &cfg,
             &workdir,
+            workdir_reported,
             client_session.as_deref(),
             &blocks,
             &mut |ev| {

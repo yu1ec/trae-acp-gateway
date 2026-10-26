@@ -197,6 +197,8 @@ pub async fn generate_content(
             Json(gemini_error(&format!("invalid workdir: {e}"), 400)),
         )
     })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -209,6 +211,7 @@ pub async fn generate_content(
     match http::run_turn_with_callback(
         state.as_ref(),
         &workdir,
+        workdir_reported,
         client_session.as_deref(),
         &blocks,
         &mut |ev| {
@@ -253,6 +256,8 @@ pub async fn stream_generate_content(
             Json(gemini_error(&format!("invalid workdir: {e}"), 400)),
         )
     })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -271,6 +276,7 @@ pub async fn stream_generate_content(
         let result = http::run_turn_with_callback(
             cfg.as_ref(),
             &workdir,
+            workdir_reported,
             client_session.as_deref(),
             &blocks,
             &mut |ev| {

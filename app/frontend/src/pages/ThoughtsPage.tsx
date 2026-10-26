@@ -195,6 +195,10 @@ function groupThoughts(segments: ThoughtSegment[]): ThoughtGroup[] {
       groups.set(key, group);
     }
     group.segments.push(segment);
+    // A conversation's title/summary requests carry no cwd, so they would
+    // otherwise name the group after the gateway's fallback (often `/`). Prefer
+    // any turn that actually reported where it ran.
+    if (segment.workdir_reported) group.workdir = segment.workdir;
     group.startedAt = Math.min(group.startedAt, segment.started_at);
     group.lastActivity = Math.max(
       group.lastActivity,

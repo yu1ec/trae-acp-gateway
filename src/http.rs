@@ -79,7 +79,7 @@ pub fn resolve_workdir(
     body: Option<&str>,
     environment_context: Option<&str>,
     system_prompt: Option<&str>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<crate::config::ResolvedWorkdir> {
     let header = headers
         .get(crate::config::WORKDIR_HEADER)
         .map(|v| {
@@ -101,17 +101,26 @@ pub fn resolve_workdir(
         source = resolved.source.as_str(),
         "resolved request workdir"
     );
-    Ok(resolved.path)
+    Ok(resolved)
 }
 
 /// Drive one full ACP turn: spawn, session/new, prompt, shutdown.
 pub async fn run_turn(
     cfg: &GatewayState,
     workdir: &str,
+    workdir_reported: bool,
     client_session: Option<&str>,
     blocks: &[PromptBlock],
 ) -> anyhow::Result<(crate::agent::SessionInfo, crate::acp::TurnOutcome)> {
-    run_turn_with_callback(cfg, workdir, client_session, blocks, &mut |_| Ok(())).await
+    run_turn_with_callback(
+        cfg,
+        workdir,
+        workdir_reported,
+        client_session,
+        blocks,
+        &mut |_| Ok(()),
+    )
+    .await
 }
 
 /// Best-effort one-line hint of what this turn asked for, shown as the
@@ -169,6 +178,7 @@ fn last_user_turn(text: &str) -> Option<&str> {
 pub async fn run_turn_with_callback(
     cfg: &GatewayState,
     workdir: &str,
+    workdir_reported: bool,
     client_session: Option<&str>,
     blocks: &[PromptBlock],
     on_event: &mut (dyn FnMut(TurnEvent<'_>) -> anyhow::Result<()> + Send),
@@ -207,6 +217,7 @@ pub async fn run_turn_with_callback(
                             session_id: session_id.clone(),
                             client_session: client_session.clone(),
                             workdir: workdir.to_string(),
+                            workdir_reported,
                             prompt: prompt.clone(),
                         });
                         thought_started = true;
@@ -287,6 +298,8 @@ pub async fn chat_completions(
                 Json(error_response(&format!("invalid workdir: {e}"), 400)),
             )
         })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
     let client_session = client_session(&headers, None);
     let completion_id = new_completion_id();
@@ -318,6 +331,7 @@ pub async fn chat_completions(
             let turn = run_turn_with_callback(
                 &cfg,
                 &workdir,
+                workdir_reported,
                 client_session.as_deref(),
                 &blocks,
                 &mut |ev| {
@@ -396,11 +410,21 @@ pub async fn chat_completions_buffered(
                 Json(error_response(&format!("invalid workdir: {e}"), 400)),
             )
         })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = vec![PromptBlock::text(flatten_messages(&req.messages))];
     let client_session = client_session(&headers, None);
     let completion_id = new_completion_id();
 
-    match run_turn(&state, &workdir, client_session.as_deref(), &blocks).await {
+    match run_turn(
+        &state,
+        &workdir,
+        workdir_reported,
+        client_session.as_deref(),
+        &blocks,
+    )
+    .await
+    {
         Ok((_, outcome)) => Ok(Json(chat_response(
             &completion_id,
             &outcome.text,

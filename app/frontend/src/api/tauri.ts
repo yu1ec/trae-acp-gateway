@@ -30,6 +30,9 @@ export interface ThoughtSegment {
   /** Client conversation id, stable across turns of the same session. */
   client_session: string | null;
   workdir: string;
+  /** True when the client reported this cwd; false when it is the gateway
+   *  fallback (auxiliary requests such as title generation carry no cwd). */
+  workdir_reported: boolean;
   started_at: number;
   ended_at: number | null;
   /** Last output time; orders concurrent live turns when picking the focus. */

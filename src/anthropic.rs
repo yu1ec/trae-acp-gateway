@@ -382,6 +382,8 @@ pub async fn messages(
             )),
         )
     })?;
+    let workdir_reported = workdir.source != crate::config::WorkdirSource::Config;
+    let workdir = workdir.path;
     let blocks = req.to_prompt_blocks();
     if blocks.is_empty() {
         return Err((
@@ -394,11 +396,26 @@ pub async fn messages(
     }
     let client_session = http::client_session(&headers, req.metadata.as_ref());
     if req.stream {
-        Ok(messages_stream(state, workdir, client_session, req, blocks)
-            .await
-            .into_response())
+        Ok(messages_stream(
+            state,
+            workdir,
+            workdir_reported,
+            client_session,
+            req,
+            blocks,
+        )
+        .await
+        .into_response())
     } else {
-        messages_buffered(state, workdir, client_session, req, blocks).await
+        messages_buffered(
+            state,
+            workdir,
+            workdir_reported,
+            client_session,
+            req,
+            blocks,
+        )
+        .await
     }
 }
 
@@ -407,6 +424,7 @@ use axum::response::IntoResponse;
 async fn messages_buffered(
     state: AppState,
     workdir: String,
+    workdir_reported: bool,
     client_session: Option<String>,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
@@ -419,6 +437,7 @@ async fn messages_buffered(
     match http::run_turn_with_callback(
         state.as_ref(),
         &workdir,
+        workdir_reported,
         client_session.as_deref(),
         &blocks,
         &mut |ev| {
@@ -455,6 +474,7 @@ async fn messages_buffered(
 async fn messages_stream(
     state: AppState,
     workdir: String,
+    workdir_reported: bool,
     client_session: Option<String>,
     req: MessagesRequest,
     blocks: Vec<PromptBlock>,
@@ -505,6 +525,7 @@ async fn messages_stream(
         let result = http::run_turn_with_callback(
             state.as_ref(),
             &workdir,
+            workdir_reported,
             client_session.as_deref(),
             &blocks,
             &mut |ev| {

@@ -26,6 +26,11 @@ pub enum ThoughtUpdate {
         session_id: String,
         client_session: Option<String>,
         workdir: String,
+        /// Whether `workdir` came from the request (header, body, environment
+        /// context, or system prompt) rather than the gateway's configured
+        /// fallback. Auxiliary requests such as title generation carry no cwd,
+        /// so the panel must not label their conversation by the fallback.
+        workdir_reported: bool,
         prompt: String,
     },
     /// Incremental reasoning text.

@@ -234,6 +234,11 @@ struct ThoughtSegment {
     /// conversation so the panel can attribute interleaved sessions.
     client_session: Option<String>,
     workdir: String,
+    /// Whether `workdir` was reported by the request rather than inherited
+    /// from the gateway's configured fallback. The panel uses this to keep
+    /// auxiliary requests (title/summary, no cwd) from naming a conversation
+    /// after the fallback directory.
+    workdir_reported: bool,
     started_at: u64,
     ended_at: Option<u64>,
     /// Last time this turn produced output. The panel focuses the live turn
@@ -312,14 +317,16 @@ impl ThoughtBuffer {
                     session_id,
                     client_session,
                     workdir,
+                    workdir_reported,
                     prompt,
                 } => {
-                    let segment = Self::segment_mut(&mut inner, &session_id, &workdir, now);
+                    let segment =
+                        Self::segment_mut(&mut inner, &session_id, &workdir, workdir_reported, now);
                     segment.client_session = client_session;
                     segment.prompt = prompt;
                 }
                 ThoughtUpdate::Delta { session_id, text } => {
-                    let segment = Self::segment_mut(&mut inner, &session_id, "", now);
+                    let segment = Self::segment_mut(&mut inner, &session_id, "", false, now);
                     segment.text.push_str(&text);
                 }
                 ThoughtUpdate::End { session_id } => {
@@ -347,6 +354,7 @@ impl ThoughtBuffer {
         inner: &'a mut ThoughtInner,
         session_id: &str,
         workdir: &str,
+        workdir_reported: bool,
         now: u64,
     ) -> &'a mut ThoughtSegment {
         if let Some(index) = inner
@@ -362,6 +370,7 @@ impl ThoughtBuffer {
             session_id: session_id.to_string(),
             client_session: None,
             workdir: workdir.to_string(),
+            workdir_reported,
             started_at: now,
             ended_at: None,
             updated_at: now,
@@ -1427,6 +1436,7 @@ mod thought_tests {
             session_id: "session-a".into(),
             client_session: Some("client-a".into()),
             workdir: "/work/a".into(),
+            workdir_reported: true,
             prompt: "first question".into(),
         });
         buffer.push(ThoughtUpdate::Delta {
@@ -1437,6 +1447,7 @@ mod thought_tests {
             session_id: "session-b".into(),
             client_session: Some("client-b".into()),
             workdir: "/work/b".into(),
+            workdir_reported: true,
             prompt: "second question".into(),
         });
         buffer.push(ThoughtUpdate::Delta {
