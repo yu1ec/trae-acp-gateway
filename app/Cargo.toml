@@ -1,6 +1,6 @@
 [package]
 name = "trae-acp-gateway-app"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 
 [build-dependencies]
@@ -18,4 +18,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
 anyhow = "1"
+base64 = "0.22"
+minisign-verify = "0.2"

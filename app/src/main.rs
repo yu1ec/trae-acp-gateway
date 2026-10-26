@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWin
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt as _;
+use tauri_plugin_updater::UpdaterExt as _;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use trae_acp_gateway::{
     ActivitySink, CURRENT_VERSION, Config as GatewayConfig, ThoughtSink, ThoughtUpdate,
@@ -17,6 +18,7 @@ use trae_acp_gateway::{
     serve_with_thoughts, user_home_dir,
 };
 
+mod permissions;
 mod update;
 
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
@@ -75,6 +77,9 @@ struct AppConfig {
     /// Open a floating panel that streams ACP reasoning chunks.
     #[serde(default)]
     thought_panel_enabled: bool,
+    /// Set after the one-time macOS permission prompt so it is not shown again.
+    #[serde(default)]
+    permissions_prompted: bool,
 }
 
 impl AppConfig {
@@ -91,6 +96,7 @@ impl AppConfig {
             autostart: false,
             auto_check_update: false,
             thought_panel_enabled: false,
+            permissions_prompted: false,
         }
     }
 
@@ -698,6 +704,9 @@ async fn save_config(
 ) -> Result<(), String> {
     normalize_workdir(&mut cfg);
     cfg.normalize_log_level();
+    // The settings page does not read this flag back; keep the persisted value
+    // so saving unrelated settings does not re-arm the one-time prompt.
+    cfg.permissions_prompted = state.cfg.lock().unwrap().permissions_prompted;
     apply_log_level(&state.log_reload, &cfg.log_level)?;
     state.thoughts.set_enabled(cfg.thought_panel_enabled);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -843,6 +852,10 @@ struct UpdateCheckResponse {
     release_url: String,
     installer_name: Option<String>,
     download_url: Option<String>,
+    /// True when the release ships a Tauri updater artifact, so the app can
+    /// install and restart in place. Older releases only have a DMG/MSI and
+    /// therefore fall back to a manual download link.
+    auto_install: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -852,6 +865,65 @@ struct UpdateDownloadProgress {
     bytes_per_sec: u64,
 }
 
+fn artifact_name(url: &str) -> Option<String> {
+    url.split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Check the Tauri updater manifest first. Releases published before updater
+/// artifacts existed have no `latest.json`, so fall back to the GitHub API and
+/// report that the update must be downloaded manually.
+async fn check_update_availability(app: &AppHandle) -> Result<UpdateCheckResponse, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let download_url = update.download_url.to_string();
+            Ok(UpdateCheckResponse {
+                current_version: update.current_version.clone(),
+                latest_version: Some(update.version.clone()),
+                update_available: true,
+                release_url: format!(
+                    "{}/releases/tag/v{}",
+                    trae_acp_gateway::GITHUB_REPO_URL,
+                    update.version
+                ),
+                installer_name: artifact_name(&download_url),
+                download_url: Some(download_url),
+                auto_install: true,
+            })
+        }
+        Ok(None) => Ok(UpdateCheckResponse {
+            current_version: CURRENT_VERSION.to_string(),
+            latest_version: None,
+            update_available: false,
+            release_url: trae_acp_gateway::GITHUB_REPO_URL.to_string(),
+            installer_name: None,
+            download_url: None,
+            auto_install: false,
+        }),
+        Err(updater_err) => {
+            tracing::warn!(
+                "updater manifest check failed: {updater_err}; falling back to GitHub API"
+            );
+            let info = update::check_app_update()
+                .await
+                .map_err(|e| format!("{updater_err}; fallback check failed: {e}"))?;
+            Ok(UpdateCheckResponse {
+                current_version: info.current_version,
+                latest_version: info.latest_version,
+                update_available: info.update_available,
+                release_url: info.release_url,
+                installer_name: info.asset_name,
+                download_url: info.download_url,
+                auto_install: false,
+            })
+        }
+    }
+}
+
 #[tauri::command]
 fn get_app_version() -> String {
     CURRENT_VERSION.to_string()
@@ -859,42 +931,57 @@ fn get_app_version() -> String {
 
 #[tauri::command]
 async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResponse, String> {
-    let info = update::check_app_update()
-        .await
-        .map_err(|e| e.to_string())?;
+    let info = check_update_availability(&app).await?;
     if info.update_available {
         if let Some(latest) = &info.latest_version {
             notify_update_available(&app, latest);
         }
     }
-    Ok(UpdateCheckResponse {
-        current_version: info.current_version,
-        latest_version: info.latest_version,
-        update_available: info.update_available,
-        release_url: info.release_url,
-        installer_name: info.asset_name,
-        download_url: info.download_url,
-    })
+    Ok(info)
+}
+
+/// Public key from `tauri.conf.json` (`plugins.updater.pubkey`), used to verify
+/// artifacts downloaded through mirrors.
+fn updater_pubkey(app: &AppHandle) -> Result<String, String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|cfg| cfg.get("pubkey"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "plugins.updater.pubkey is not configured".to_string())
 }
 
 #[tauri::command]
-async fn download_and_install_update(app: AppHandle, accelerate: bool) -> Result<(), String> {
-    let info = update::check_app_update()
+async fn download_and_install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    accelerate: bool,
+) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
         .await
-        .map_err(|e| e.to_string())?;
-    if !info.update_available {
-        return Err(format!("already up to date (v{CURRENT_VERSION})"));
-    }
-    let github_url = info.download_url.clone().ok_or_else(|| {
-        format!(
-            "release has no installer asset `{}`",
-            info.asset_name.unwrap_or_default()
-        )
-    })?;
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("already up to date (v{CURRENT_VERSION})"))?;
 
+    let permission = permissions::status();
+    if permission.translocated {
+        return Err(
+            "当前应用从 macOS 隔离路径运行，请先把 Trae ACP Gateway 拖到「应用程序」后再更新。"
+                .into(),
+        );
+    }
+
+    let url = update.download_url.to_string();
+    let filename = artifact_name(&url).unwrap_or_else(|| "update.bin".into());
     let app_emit = app.clone();
-    let result =
-        update::download_and_install(accelerate, move |downloaded, total, bytes_per_sec| {
+    let downloaded = update::download_update_artifact(
+        &url,
+        &filename,
+        accelerate,
+        move |downloaded, total, bytes_per_sec| {
             let _ = app_emit.emit(
                 "update-download-progress",
                 UpdateDownloadProgress {
@@ -903,15 +990,72 @@ async fn download_and_install_update(app: AppHandle, accelerate: bool) -> Result
                     bytes_per_sec,
                 },
             );
-        })
-        .await;
+        },
+    )
+    .await
+    .map_err(|e| format!("{e}. Manual download: {url}"))?;
 
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
+    // Read and verify before touching the running gateway, so a tampered or
+    // truncated download leaves everything as-is.
+    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(downloaded))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("reading downloaded update: {e}"))?;
+
+    let pubkey = updater_pubkey(&app)?;
+    update::verify_update_signature(&bytes, &update.signature, &pubkey, &update.version)
+        .map_err(|e| format!("{e}. Manual download: {url}"))?;
+
+    // Stop the gateway before swapping the app bundle so no ACP turn is cut
+    // mid-flight.
+    stop(&state).await;
+
+    let install_result = tauri::async_runtime::spawn_blocking(move || update.install(bytes))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = install_result {
+        // The gateway was stopped above; bring it back so a failed install (for
+        // example a cancelled admin prompt) does not leave the app unusable.
+        let _ = start(&app, state.inner()).await;
+        return Err(format!("installing update: {e}"));
     }
 
-    result.map_err(|e| format!("{e}. Manual download: {github_url}"))
+    #[cfg(target_os = "windows")]
+    {
+        // The updater launches the installer and exits the process already.
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Reply to the settings page first, then relaunch into the new bundle.
+        let restart_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            restart_app.restart();
+        });
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn get_permission_status() -> permissions::PermissionStatus {
+    permissions::status()
+}
+
+#[tauri::command]
+fn open_permission_settings(pane: String) -> Result<(), String> {
+    permissions::open_settings(&pane).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reveal_app_in_finder() -> Result<(), String> {
+    permissions::reveal_in_finder().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_media_library_permission() -> Result<(), String> {
+    permissions::reset_media_library().map_err(|e| e.to_string())
 }
 
 struct LogWriter(Arc<LogBuffer>);
@@ -1030,6 +1174,74 @@ async fn start_after_trae_cli_check(app: AppHandle) {
     }
 }
 
+/// One-time macOS permission hint.
+///
+/// Full Disk Access is optional: only protected locations (Desktop, Documents,
+/// Downloads, removable volumes) need it. The prompt is deliberately dismissible
+/// and the settings page keeps a permanent entry point.
+fn maybe_prompt_permissions(app: AppHandle) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if app
+            .state::<AppState>()
+            .cfg
+            .lock()
+            .unwrap()
+            .permissions_prompted
+        {
+            return;
+        }
+
+        tauri::async_runtime::spawn(async move {
+            let already_granted = permissions::status().full_disk_access == Some(true);
+            if !already_granted {
+                let dialog_app = app.clone();
+                let open_settings = tauri::async_runtime::spawn_blocking(move || {
+                    dialog_app
+                        .dialog()
+                        .message(
+                            "如果 Gateway 需要读取「桌面」「文稿」「下载」或其它受保护目录中的项目，\
+                             请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中勾选 Trae ACP Gateway。\n\n\
+                             普通项目目录（例如 ~/codes）不需要该权限，可以稍后在设置页授权。",
+                        )
+                        .title("系统权限（可选）")
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "打开设置".into(),
+                            "稍后".into(),
+                        ))
+                        .blocking_show()
+                })
+                .await
+                .unwrap_or(false);
+
+                if open_settings {
+                    if let Err(e) = permissions::open_settings("full-disk-access") {
+                        tracing::warn!("failed to open Full Disk Access settings: {e}");
+                    }
+                }
+            }
+
+            let state = app.state::<AppState>();
+            {
+                let mut cfg = state.cfg.lock().unwrap();
+                if cfg.permissions_prompted {
+                    return;
+                }
+                cfg.permissions_prompted = true;
+            }
+            let cfg = state.cfg.lock().unwrap().clone();
+            if let Err(e) = persist_config(&app, &cfg) {
+                tracing::warn!("failed to persist permission prompt flag: {e}");
+            }
+        });
+    }
+}
+
 fn main() {
     let logs = Arc::new(LogBuffer::new());
     let (filter_layer, log_reload) = reload::Layer::new(env_filter_for_level("info"));
@@ -1050,6 +1262,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             // Closing a window just hides it; the app lives in the tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1076,6 +1289,10 @@ fn main() {
             install_trae_cli_command,
             check_for_update,
             download_and_install_update,
+            get_permission_status,
+            open_permission_settings,
+            reveal_app_in_finder,
+            reset_media_library_permission,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
@@ -1169,16 +1386,26 @@ fn main() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(start_after_trae_cli_check(app_handle));
 
+            // Give the gateway a moment to settle before showing a permission
+            // dialog, so it never competes with the TRAE CLI install prompt.
+            let permission_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                maybe_prompt_permissions(permission_app);
+            });
+
             let auto_check = cfg.auto_check_update;
             if auto_check {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Ok(info) = update::check_app_update().await {
-                        if info.update_available {
+                    match check_update_availability(&app_handle).await {
+                        Ok(info) if info.update_available => {
                             if let Some(latest) = info.latest_version {
                                 notify_update_available(&app_handle, &latest);
                             }
                         }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("update check failed: {e}"),
                     }
                 });
             }

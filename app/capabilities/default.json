@@ -6,6 +6,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-close",
     "core:window:allow-set-size",
+    "core:window:allow-set-theme",
     "core:window:allow-set-always-on-top",
     "core:window:allow-inner-size",
     "core:window:allow-outer-size",
@@ -16,6 +17,7 @@
     "core:window:allow-cursor-position",
     "notification:default",
     "dialog:default",
-    "opener:default"
+    "opener:default",
+    "updater:default"
   ]
 }

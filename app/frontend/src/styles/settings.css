@@ -18,8 +18,15 @@
   width: 100%;
   box-sizing: border-box;
   padding: 6px;
-  border: 1px solid gray;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
+  background: var(--field-bg);
+  color: var(--fg);
+}
+
+.settings-page input[type="checkbox"],
+.settings-page input[type="range"] {
+  accent-color: var(--link);
 }
 
 .settings-page input[type="number"] {
@@ -39,8 +46,19 @@
 .settings-page button {
   padding: 6px 14px;
   border-radius: 6px;
-  border: 1px solid rgba(136, 136, 136, 0.53);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--fg);
   cursor: pointer;
+}
+
+.settings-page button:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.settings-page button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .settings-page .checks label {
@@ -50,7 +68,7 @@
 
 .settings-page #status {
   margin-top: 14px;
-  color: gray;
+  color: var(--fg-muted);
   min-height: 18px;
 }
 
@@ -67,6 +85,27 @@
   margin-bottom: 8px;
 }
 
+.settings-page .permission-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-page .permission-row label {
+  margin-bottom: 2px;
+}
+
+.settings-page .permission-warning {
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
 .settings-page .update-progress progress {
   width: 100%;
   height: 8px;
@@ -77,21 +116,25 @@
   gap: 12px;
   margin-top: 6px;
   font-size: 0.875rem;
-  color: gray;
+  color: var(--fg-muted);
 }
 
 .settings-page .link-button {
   background: none;
   border: none;
   padding: 0;
-  color: #2563eb;
+  color: var(--link);
   text-decoration: underline;
   cursor: pointer;
   font-size: inherit;
 }
 
+.settings-page .link-button:hover {
+  background: none;
+}
+
 .settings-page .settings-hint {
-  color: gray;
+  color: var(--fg-muted);
   font-size: 0.8rem;
   line-height: 1.35;
 }

@@ -10,7 +10,7 @@
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.35);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
@@ -18,25 +18,33 @@
   font: 11px ui-monospace, Menlo, Consolas, monospace;
   padding: 5px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--border);
+  color: var(--fg);
   cursor: pointer;
   background: transparent;
   flex-shrink: 0;
 }
 
 .log-clear-btn:hover {
-  background: rgba(229, 72, 77, 0.12);
-  border-color: rgba(229, 72, 77, 0.45);
-  color: #e5484d;
+  background: var(--log-error-bg);
+  border-color: var(--log-error);
+  color: var(--log-error);
 }
 
 .log-search {
   flex: 1;
   min-width: 140px;
   padding: 5px 8px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--border);
   border-radius: 6px;
+  background: var(--field-bg);
+  color: var(--fg);
   font: 12px ui-monospace, Menlo, Consolas, monospace;
+}
+
+.log-search::placeholder {
+  color: var(--fg-muted);
+  opacity: 0.8;
 }
 
 .level-filters {
@@ -49,7 +57,7 @@
   font: 10px ui-monospace, Menlo, Consolas, monospace;
   padding: 3px 7px;
   border-radius: 4px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--border);
   cursor: pointer;
   opacity: 0.45;
   background: transparent;
@@ -62,20 +70,20 @@
 
 .level-btn.lv-ERROR,
 .level-btn.lv-FATAL {
-  color: #e5484d;
+  color: var(--log-error);
 }
 
 .level-btn.lv-WARN {
-  color: #d97706;
+  color: var(--log-warn);
 }
 
 .level-btn.lv-INFO {
-  color: #2e9e5b;
+  color: var(--log-info);
 }
 
 .level-btn.lv-DEBUG,
 .level-btn.lv-TRACE {
-  color: #8a8f98;
+  color: var(--log-debug);
 }
 
 .log-viewer {
@@ -96,8 +104,8 @@
 .log-json {
   margin: 3px 0 6px;
   padding: 5px 8px;
-  border-left: 2px solid rgba(128, 128, 128, 0.35);
-  background: rgba(128, 128, 128, 0.08);
+  border-left: 2px solid var(--border);
+  background: var(--hover-bg);
   border-radius: 0 4px 4px 0;
   white-space: pre;
   overflow-x: auto;
@@ -119,7 +127,7 @@
 
 .log-json-caret {
   margin-right: 3px;
-  color: #6f9ef0;
+  color: var(--link);
 }
 
 .log-json-preview {
@@ -136,26 +144,26 @@
 
 .log-line .lv-ERROR,
 .log-line .lv-FATAL {
-  color: #e5484d;
+  color: var(--log-error);
   font-weight: 700;
 }
 
 .log-line .lv-WARN {
-  color: #d97706;
+  color: var(--log-warn);
   font-weight: 600;
 }
 
 .log-line .lv-INFO {
-  color: #2e9e5b;
+  color: var(--log-info);
 }
 
 .log-line .lv-DEBUG,
 .log-line .lv-TRACE {
-  color: #8a8f98;
+  color: var(--log-debug);
 }
 
 .log-line.err {
-  background: rgba(229, 72, 77, 0.1);
+  background: var(--log-error-bg);
   border-radius: 3px;
 }
 
@@ -165,15 +173,16 @@
   bottom: 12px;
   font: 11px ui-monospace, Menlo, Consolas, monospace;
   padding: 5px 12px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--scroll-ctl-border);
   border-radius: 999px;
-  background: rgba(30, 30, 30, 0.85);
-  color: #eee;
+  background: var(--scroll-ctl-bg);
+  color: var(--scroll-ctl-fg);
+  box-shadow: var(--shadow);
   cursor: pointer;
   user-select: none;
 }
 
 .scroll-ctl.resume {
-  background: rgba(46, 158, 91, 0.9);
-  color: #fff;
+  background: var(--scroll-ctl-resume-bg);
+  color: var(--scroll-ctl-resume-fg);
 }

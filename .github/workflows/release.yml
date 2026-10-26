@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
@@ -18,7 +22,7 @@ jobs:
           - platform: macos-latest
             rust_target: universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            tauri_args: '--target universal-apple-darwin --no-sign'
+            tauri_args: '--target universal-apple-darwin'
           - platform: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             rust_targets: ''
@@ -88,9 +92,68 @@ jobs:
           # aborting the job before the build. A full version skips the lookup.
           tool: tauri-cli@2.12.4
 
+      # 用固定的自签名证书签名，而不是 ad-hoc。目的是让代码签名的
+      # designated requirement 保持稳定，用户的完全磁盘访问等 TCC 授权
+      # 不会每次发版都重置。证书由 scripts/macos-signing-cert.sh 生成。
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_CERT_P12:-}" ] || [ -z "${MACOS_CERT_PASSWORD:-}" ]; then
+            echo "::error::缺少 MACOS_CERT_P12 / MACOS_CERT_PASSWORD secret。"
+            echo "::error::请先运行 bash scripts/macos-signing-cert.sh 并写入 secrets。"
+            echo "::error::不要回退到 ad-hoc 签名，否则用户的系统授权会每次发版重置。"
+            exit 1
+          fi
+          if [ -z "${MACOS_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::缺少 MACOS_SIGNING_IDENTITY secret。"
+            exit 1
+          fi
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+
+          printf '%s' "$MACOS_CERT_P12" | openssl base64 -d -A -out "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          # 允许 codesign 在无图形界面的 runner 上直接使用私钥。
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          # 临时 keychain 放进用户搜索列表，login keychain 保留；
+          # system keychain 属于系统域，不需要写进这个列表。
+          security list-keychains -d user -s "$keychain" \
+            "$HOME/Library/Keychains/login.keychain-db"
+
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -p codesigning "$keychain"
+
+      - name: Validate updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY secret。"
+            echo "::error::请先运行 bash scripts/updater-key.sh 并写入 secrets。"
+            exit 1
+          fi
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           tagName: ${{ github.ref_name }}
@@ -98,28 +161,37 @@ jobs:
           releaseBody: |
             > CLI 形态已停止后续开发，Release 不再提供 CLI 二进制；请使用桌面 App。
 
-            ## App (stable names for auto-update)
+            ## App (stable names for manual download)
             - `Trae-ACP-Gateway-macos-universal.dmg` — macOS
             - `Trae-ACP-Gateway-linux-x86_64.AppImage` — Linux
             - `Trae-ACP-Gateway-windows-x86_64.msi` — Windows
+            - `Trae-ACP-Gateway-windows-x86_64-setup.exe` — Windows (NSIS)
 
             ## App (bundles from Tauri)
             - macOS: `.app` + DMG (Universal)
             - Linux: DEB + AppImage
             - Windows: MSI + NSIS
 
-            > macOS 安装包为 ad-hoc 签名（未公证）。首次打开如提示"无法验证开发者"，
-            > 请到「系统设置 → 隐私与安全性」点击「仍要打开」，或执行
-            > `xattr -dr com.apple.quarantine "/Applications/Trae ACP Gateway.app"`。
-            > 首次运行如弹出「想访问 Apple Music…」，请点击「不允许」，网关不需要该权限。
+            > macOS 安装包使用固定自签名证书签名（未公证）。首次打开如提示
+            > “无法验证开发者”，请到「系统设置 → 隐私与安全性」点击「仍要打开」。
+            > 签名身份跨版本固定，已授权的完全磁盘访问等权限升级后不会重置。
+            >
+            > 从本版本开始，应用内更新会下载 updater 产物、原地替换并自动重启，
+            > 不再需要手动拖拽 DMG。首次从旧版本升级仍需手动安装一次。
+            >
+            > 首次运行如弹出「想访问 Apple Music…」，请点击「不允许」，网关不需要该权限；
+            > 也可在设置页的「System permissions」中清除授权记录。
           releaseDraft: false
           prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           args: ${{ matrix.tauri_args }}
 
-      - name: Upload App installer (stable names)
+      - name: Publish stable asset names and verify macOS signature
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           if [ "${{ matrix.platform }}" = "macos-latest" ]; then
@@ -145,32 +217,30 @@ jobs:
           case "${{ matrix.platform }}" in
             macos-latest)
               dmg=$(find "$bundle_root/dmg" -name '*.dmg' -type f | head -1)
-              if [ -z "$dmg" ]; then
-                echo "DMG not found under $bundle_root/dmg" >&2
+              app=$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -type d | head -1)
+              if [ -z "$dmg" ] || [ -z "$app" ]; then
+                echo "DMG or .app not found under $bundle_root" >&2
                 exit 1
               fi
-              app="$bundle_root/macos/Trae ACP Gateway.app"
-              if [ ! -d "$app" ]; then
-                echo "App bundle not found under $bundle_root/macos" >&2
-                exit 1
-              fi
-              # Ad-hoc sign the bundle. This does not make Gatekeeper trust the app,
-              # but it turns the "app is damaged" error into the overridable
-              # "unidentified developer" prompt and gives the app a stable identity.
-              codesign --force --deep --sign - "$app"
+
+              # The Tauri bundler signed the app with the imported certificate
+              # before creating the DMG and the updater tarball. Verify that
+              # instead of re-signing: re-signing after the fact would invalidate
+              # the updater artifact signature generated during the build.
               codesign --verify --deep --strict "$app"
-              codesign -dv "$app" 2>&1 | sed 's/^/  /'
-              # Rebuild the DMG from the signed bundle so the shipped image contains it.
-              staging=/tmp/trae-acp-gateway-dmg
-              rm -rf "$staging"
-              mkdir -p "$staging"
-              cp -R "$app" "$staging/"
-              ln -s /Applications "$staging/Applications"
-              hdiutil create -volname "Trae ACP Gateway" -srcfolder "$staging" \
-                -ov -format UDZO /tmp/Trae-ACP-Gateway-macos-universal.dmg
-              # Replace the unsigned DMG uploaded by tauri-action, then publish stable name.
-              cp /tmp/Trae-ACP-Gateway-macos-universal.dmg "/tmp/$(basename "$dmg")"
-              gh release upload "${{ github.ref_name }}" "/tmp/$(basename "$dmg")" --clobber
+              codesign -dv --verbose=4 "$app" 2>&1 | sed 's/^/  /'
+              requirement="$(codesign -d -r- "$app" 2>&1 || true)"
+              echo "$requirement" | sed 's/^/  /'
+              if printf '%s' "$requirement" | grep -q 'cdhash'; then
+                echo "::error::应用仍是 ad-hoc 签名（requirement 含 cdhash），用户的系统授权会在发版后重置。" >&2
+                exit 1
+              fi
+              if ! codesign -dv --verbose=4 "$app" 2>&1 | grep -Fq "Authority=$MACOS_SIGNING_IDENTITY"; then
+                echo "::error::应用未使用预期证书签名：$MACOS_SIGNING_IDENTITY" >&2
+                exit 1
+              fi
+
+              cp "$dmg" /tmp/Trae-ACP-Gateway-macos-universal.dmg
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-macos-universal.dmg --clobber
               ;;
             ubuntu-22.04)
@@ -190,5 +260,48 @@ jobs:
               fi
               cp "$msi" /tmp/Trae-ACP-Gateway-windows-x86_64.msi
               gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-windows-x86_64.msi --clobber
+              setup=$(find "$bundle_root/nsis" -name '*-setup.exe' -type f | head -1)
+              if [ -n "$setup" ]; then
+                cp "$setup" /tmp/Trae-ACP-Gateway-windows-x86_64-setup.exe
+                gh release upload "${{ github.ref_name }}" /tmp/Trae-ACP-Gateway-windows-x86_64-setup.exe --clobber
+              fi
               ;;
           esac
+
+  # tauri-action writes the GitHub API asset URL into latest.json. Those URLs
+  # cannot be proxied by ghfast.top / gh-proxy.com, and unauthenticated API
+  # downloads are rate-limited. Rewrite them to browser download URLs so the
+  # in-app mirror-aware downloader works.
+  finalize-updater:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Rewrite latest.json to mirror-friendly URLs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          gh release download "$TAG" --pattern latest.json --dir "$tmp"
+          gh api "repos/$REPO/releases/tags/$TAG" > "$tmp/release.json"
+
+          jq --slurpfile rel "$tmp/release.json" '
+            .platforms |= with_entries(
+              .value.url as $url
+              | (($rel[0].assets[] | select(.url == $url) | .browser_download_url) // null) as $browser
+              | if $browser != null then .value.url = $browser else . end
+            )
+          ' "$tmp/latest.json" > "$tmp/latest.new.json"
+
+          if diff -q "$tmp/latest.json" "$tmp/latest.new.json" >/dev/null; then
+            echo "latest.json already uses browser download URLs"
+          else
+            mv "$tmp/latest.new.json" "$tmp/latest.json"
+            gh release upload "$TAG" "$tmp/latest.json" --clobber
+            echo "Rewrote latest.json download URLs"
+          fi
+
+          jq . "$tmp/latest.json"

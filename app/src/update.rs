@@ -1,68 +1,77 @@
-//! App-side update helpers: download installer and launch it.
+//! App-side update helpers.
+//!
+//! The Tauri updater plugin owns the manifest/version/signature flow; this
+//! module only keeps the legacy GitHub API check as a fallback for releases
+//! that predate updater artifacts, and exposes the mirror-aware downloader.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
+use base64::Engine as _;
+use minisign_verify::{PublicKey, Signature};
 use trae_acp_gateway::{
-    CURRENT_VERSION, UpdateCheckResult, app_installer_asset_name, check_for_update,
-    download_with_mirrors,
+    UpdateCheckResult, app_installer_asset_name, check_for_update, download_with_mirrors,
 };
 
+/// GitHub API fallback used when the release has no `latest.json`.
 pub async fn check_app_update() -> anyhow::Result<UpdateCheckResult> {
     let asset = app_installer_asset_name()?;
     check_for_update(asset).await
 }
 
-pub async fn download_and_install(
+/// Download an updater artifact (`.app.tar.gz`, `.nsis.zip`, ...) to a temp
+/// file, optionally trying the configured GitHub mirrors first.
+pub async fn download_update_artifact(
+    url: &str,
+    filename: &str,
     accelerate: bool,
-    mut on_progress: impl FnMut(u64, Option<u64>, u64),
-) -> anyhow::Result<()> {
-    let asset_name = app_installer_asset_name()?;
-    let info = check_for_update(asset_name).await?;
-    if !info.update_available {
-        anyhow::bail!("already up to date (v{CURRENT_VERSION})");
-    }
-    let Some(url) = info.download_url else {
-        anyhow::bail!("release has no installer asset `{asset_name}`");
-    };
-    let path = download_with_mirrors(&url, asset_name, accelerate, &mut on_progress).await?;
-    launch_installer(&path)?;
-    Ok(())
+    on_progress: impl FnMut(u64, Option<u64>, u64),
+) -> anyhow::Result<PathBuf> {
+    download_with_mirrors(url, filename, accelerate, on_progress)
+        .await
+        .context("downloading update artifact")
 }
 
-pub fn launch_installer(path: &Path) -> anyhow::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .context("opening DMG installer")?;
-    }
+/// Verify the minisign signature from `latest.json` before installing.
+///
+/// The plugin only verifies inside its own `download()`, which we bypass to
+/// support GitHub mirrors, so `install()` would otherwise accept any bytes.
+/// Mirrors are therefore not trusted: a tampered artifact fails here.
+pub fn verify_update_signature(
+    data: &[u8],
+    release_signature: &str,
+    pub_key: &str,
+    announced_version: &str,
+) -> anyhow::Result<()> {
+    let decode = |value: &str| -> anyhow::Result<String> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .context("base64 decoding signature material")?;
+        String::from_utf8(bytes).context("signature material is not UTF-8")
+    };
 
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("msiexec")
-            .args(["/i", path.to_str().unwrap_or("")])
-            .spawn()
-            .context("launching MSI installer")?;
-    }
+    let public_key = PublicKey::decode(&decode(pub_key)?).context("decoding updater public key")?;
+    let signature =
+        Signature::decode(&decode(release_signature)?).context("decoding update signature")?;
 
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms)?;
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .context("launching AppImage installer")?;
-    }
+    public_key
+        .verify(data, &signature, true)
+        .context("update signature verification failed")?;
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        let _ = path;
-        anyhow::bail!("unsupported platform for installer launch");
+    // The manifest itself is not signed. Requiring the version embedded in the
+    // signed trusted comment stops a tampered manifest from pairing an inflated
+    // version with an older artifact's URL and signature (a downgrade replay).
+    let signed = signature
+        .trusted_comment()
+        .split('\t')
+        .find_map(|field| field.strip_prefix("version:"))
+        .context("update signature does not carry a signed version")?;
+
+    let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
+    if normalize(signed) != normalize(announced_version) {
+        anyhow::bail!(
+            "signed version {signed} does not match announced version {announced_version}"
+        );
     }
 
     Ok(())

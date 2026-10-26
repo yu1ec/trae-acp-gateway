@@ -230,11 +230,28 @@ async fn download_url_to_temp(
     let resp = client
         .get(url)
         .header("User-Agent", "trae-acp-gateway")
+        // GitHub's release-asset API needs this header to return the binary
+        // instead of the asset metadata JSON. It is harmless for browser-style
+        // download URLs and mirror proxies.
+        .header("Accept", "application/octet-stream")
         .send()
         .await
         .with_context(|| format!("requesting `{url}`"))?
         .error_for_status()
         .with_context(|| format!("HTTP error for `{url}`"))?;
+
+    // A mirror may answer with a JSON/HTML error page under a 200 status.
+    // Reject those so the caller can fall through to the next URL instead of
+    // installing a bogus artifact.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if content_type.starts_with("application/json") || content_type.starts_with("text/html") {
+        bail!("unexpected content type `{content_type}` for `{url}`");
+    }
 
     let total = resp.content_length();
     let dir = std::env::temp_dir().join("trae-acp-gateway-updates");

@@ -35,11 +35,13 @@ ARCH ?= $(HOST_ARCH)
 
 # SIGN=0 (default) passes --no-sign to tauri build
 SIGN ?= 0
+# SIGN_IDENTITY is the code-signing certificate CN, e.g. "Trae ACP Gateway Signing"
+SIGN_IDENTITY ?=
 
 # INIT_TARGETS=all adds all common rustup targets during init
 INIT_TARGETS ?= current
 
-.PHONY: help init init-rust init-tauri init-frontend icons build-cli build-frontend build-app dev-app run-cli release bump-version check-version clean
+.PHONY: help init init-rust init-tauri init-frontend icons build-cli build-frontend build-app dev-app run-cli release bump-version check-version signing-cert updater-key clean
 
 .DEFAULT_GOAL := help
 
@@ -57,6 +59,8 @@ help:
 	@echo "  release       Auto bump version by type and print git tag commands"
 	@echo "  bump-version  Sync version to an explicit version"
 	@echo "  check-version Validate version matches tag (CI check)"
+	@echo "  signing-cert  Generate/import the macOS self-signed code-signing certificate"
+	@echo "  updater-key   Generate the Tauri updater minisign key pair"
 	@echo "  clean       Remove build artifacts (cargo clean)"
 	@echo ""
 	@echo "Variables:"
@@ -64,6 +68,7 @@ help:
 	@echo "  ARCH        Target arch: arm64 | x86_64 | universal  (default: $(HOST_ARCH))"
 	@echo "  BUNDLES     Installer types (default per OS)"
 	@echo "  SIGN        1=enable signing, 0=--no-sign  (default: 0)"
+	@echo "  SIGN_IDENTITY  macOS signing certificate CN (e.g. \"Trae ACP Gateway Signing\")"
 	@echo "  INIT_TARGETS  current | all  (default: current)"
 	@echo "  TYPE        Release bump type: patch | minor | major (for release)"
 	@echo "  DRY_RUN     1=preview release without changing files"
@@ -77,6 +82,9 @@ help:
 	@echo "  make build-app"
 	@echo "  make build-app OS=macos ARCH=universal BUNDLES=app,dmg"
 	@echo "  make build-app OS=windows ARCH=x86_64 BUNDLES=msi"
+	@echo "  make build-app SIGN=1 SIGN_IDENTITY=\"Trae ACP Gateway Signing\""
+	@echo "  make signing-cert"
+	@echo "  make updater-key"
 	@echo "  make dev-app"
 	@echo "  make run-cli"
 	@echo "  make release TYPE=patch"
@@ -176,6 +184,15 @@ build-app: check-app-host
 	if [ -n "$(BUNDLES)" ]; then bundles="$(BUNDLES)"; fi; \
 	sign_args=""; \
 	if [ "$(SIGN)" != "1" ]; then sign_args="--no-sign"; fi; \
+	if [ -n "$(SIGN_IDENTITY)" ]; then export APPLE_SIGNING_IDENTITY="$(SIGN_IDENTITY)"; fi; \
+	if [ -z "$${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$(CURDIR)/.signing/updater.key" ]; then \
+		export TAURI_SIGNING_PRIVATE_KEY="$$(cat "$(CURDIR)/.signing/updater.key")"; \
+		export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$$(cat "$(CURDIR)/.signing/updater-password.txt" 2>/dev/null || true)"; \
+	fi; \
+	if [ -z "$${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then \
+		echo "ERROR: updater signing key not found. Run 'make updater-key' first." >&2; \
+		exit 1; \
+	fi; \
 	echo "==> Building $(APP_NAME) for $(OS)/$(ARCH) ($$triple)"; \
 	echo "    bundles: $$bundles"; \
 	cd $(APP_DIR) && $(CARGO) tauri build --target $$triple --bundles $$bundles $$sign_args; \
@@ -212,6 +229,12 @@ bump-version:
 
 check-version:
 	@./scripts/check-version.sh "$(TAG)"
+
+signing-cert:
+	@bash ./scripts/macos-signing-cert.sh --import
+
+updater-key:
+	@bash ./scripts/updater-key.sh
 
 clean:
 	$(CARGO) clean

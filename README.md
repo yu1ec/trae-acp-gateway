@@ -245,7 +245,25 @@ App 设置页提供：
 
 - **Check for updates on startup**：启动时在后台检查 GitHub Releases，发现新版本会发送系统通知
 - **Check now**：手动检查，发现新版本时同样发送系统通知
-- **Install vX.Y.Z**：下载对应平台安装包并启动安装程序（macOS DMG / Linux AppImage / Windows MSI）
+- **安装 vX.Y.Z 并重启**：下载 updater 产物并校验 minisign 签名，然后原地替换应用、自动重启；不需要手动下载安装包或拖拽 DMG
+- **加速下载**：优先走 `ghfast.top` / `gh-proxy.com` 镜像，下载失败会自动回退到 GitHub 直连
+
+> 从下一个版本起，Release 会附带 `latest.json` 和更新包签名。已发布的 0.10.0 不支持应用内更新，首次升级仍需手动安装一次；之后即可在应用内完成更新。
+
+### 系统权限（macOS）
+
+网关本身只需要读写自己的工作目录和配置。下面这些权限都是**可选**的，只有 Agent 需要访问受保护目录时才需要：
+
+| 权限 | 什么时候需要 | 设置位置 |
+|------|--------------|----------|
+| 完全磁盘访问权限 | 项目位于「桌面」「文稿」「下载」、外接磁盘或其它受 TCC 保护的目录 | 系统设置 → 隐私与安全性 → 完全磁盘访问权限 |
+| 文件与文件夹 | 只想授权某一个受保护目录，而不是全盘 | 系统设置 → 隐私与安全性 → 文件与文件夹 |
+| 通知 | 启动时检查到新版本、Gateway 异常退出时发送通知 | 系统设置 → 通知 |
+| 媒体与 Apple 音乐 | **不需要**。Agent 扫描受保护目录时 macOS 可能误弹，点「不允许」即可 | 设置页可「清除授权记录」 |
+
+设置页的 **System permissions** 面板会显示当前完全磁盘访问状态，并提供「打开设置」「在 Finder 中显示」「重新检测」「清除媒体库授权记录」按钮。首次启动如果检测到尚未授权，会弹一次提示，之后不再打扰。
+
+> TCC 授权按代码签名的 designated requirement 记录。发布包使用固定自签名证书 `Trae ACP Gateway Signing`，requirement 只包含 bundle id 和证书指纹，因此升级后已授予的权限不会重置；ad-hoc 签名会因为 cdhash 每次变化而让用户重新授权。
 
 App 配置保存在 `{app_data_dir}/config.json`，字段 `auto_check_update`（默认 `false`）。
 
@@ -321,13 +339,45 @@ git push origin HEAD --tags
 
 3. 在 GitHub **Actions** 页查看构建进度，完成后在 **Releases** 页下载产物
 
+### 发布前准备：签名密钥（只需一次）
+
+macOS 代码签名和自动更新各需要一套密钥。密钥只生成一次，之后每版复用；**丢失后无法补发能被旧版本验证的更新**。
+
+```bash
+# 1. macOS 固定自签名证书（生成 .signing/cert.p12 等文件）
+bash scripts/macos-signing-cert.sh
+
+# 2. Tauri updater minisign 密钥对（公钥会自动写入 app/tauri.conf.json）
+bash scripts/updater-key.sh
+
+# 3. 写入 GitHub Secrets
+gh secret set MACOS_CERT_P12 < .signing/cert.p12.b64
+gh secret set MACOS_CERT_PASSWORD < .signing/p12-password.txt
+gh secret set MACOS_SIGNING_IDENTITY --body "Trae ACP Gateway Signing"
+gh secret set TAURI_SIGNING_PRIVATE_KEY < .signing/updater.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD < .signing/updater-password.txt
+```
+
+`.signing/` 已加入 `.gitignore`。请把整个目录离线备份（U 盘或密码管理器），不要提交到仓库。
+
+`app/tauri.conf.json` 已开启 `createUpdaterArtifacts`，所以 `make build-app` 会自动读取 `.signing/updater.key` 为更新包签名；找不到密钥时会直接报错并提示先运行 `make updater-key`。
+
+本地签名构建：
+
+```bash
+bash scripts/macos-signing-cert.sh --import   # 导入 login keychain
+APPLE_SIGNING_IDENTITY="Trae ACP Gateway Signing" make build-app SIGN=1
+```
+
 ### 发布产物
 
-| 平台 | App（Tauri 默认 bundle） | App（稳定名，供自动更新） |
+| 平台 | App（Tauri 默认 bundle） | App（稳定名，供手动下载） |
 |------|--------------------------|---------------------------|
 | macOS | `.app` + DMG（Universal） | `Trae-ACP-Gateway-macos-universal.dmg` |
 | Linux | DEB + AppImage | `Trae-ACP-Gateway-linux-x86_64.AppImage` |
 | Windows | MSI + NSIS | `Trae-ACP-Gateway-windows-x86_64.msi` |
+
+Release 还会附带 `latest.json` 以及各平台的 updater 产物（`.app.tar.gz`、`.nsis.zip`、`.AppImage.tar.gz`）和 `.sig` 签名，供应用内自动更新使用。
 
 > 仓库需在 **Settings → Actions → General → Workflow permissions** 中启用 **Read and write permissions**，否则无法创建 Release。
 >
@@ -337,7 +387,7 @@ git push origin HEAD --tags
 
 ### macOS
 
-发布包使用 **ad-hoc 签名**，未经过 Apple 公证。首次打开时 Gatekeeper 会拦截，按下面任一方式放行即可（只需一次）：
+发布包使用**固定自签名证书**（`Trae ACP Gateway Signing`）签名，未经过 Apple 公证。首次打开时 Gatekeeper 会拦截，按下面任一方式放行即可（只需一次）：
 
 - 到「系统设置 → 隐私与安全性」，在页面底部点击「仍要打开」
 - 或在终端执行：
@@ -348,6 +398,8 @@ open "/Applications/Trae ACP Gateway.app"
 ```
 
 如果提示「已损坏，无法打开」，同样用上面的 `xattr` 命令清除隔离属性后再打开。
+
+> 签名身份跨版本固定，升级后「完全磁盘访问权限」等 TCC 授权不会重置。首次打开后建议把 App 拖进 `/Applications`，从 App Translocation 路径运行会导致授权和就地更新失效。
 
 > 首次运行时如果弹出「“Trae ACP Gateway” 想访问 Apple Music、你的音乐与视频活动以及你的媒体资料库」，**请点击「不允许」**。网关本身不需要媒体库权限，这个弹窗是沙箱内 agent 执行的 `find` 等搜索命令扫到受保护目录时由 macOS 触发的。清除已保存的授权可执行 `tccutil reset MediaLibrary com.trae.acp-gateway`。
 

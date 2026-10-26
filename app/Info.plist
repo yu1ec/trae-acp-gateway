@@ -4,5 +4,15 @@
 <dict>
     <key>LSUIElement</key>
     <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Trae ACP Gateway 需要读取桌面中的项目目录，供 AI Agent 处理请求。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Trae ACP Gateway 需要读取文稿中的项目目录，供 AI Agent 处理请求。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Trae ACP Gateway 需要读取下载目录中的项目文件，供 AI Agent 处理请求。</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Trae ACP Gateway 需要读取外接磁盘中的项目目录，供 AI Agent 处理请求。</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Trae ACP Gateway 需要读取网络宗卷中的项目目录，供 AI Agent 处理请求。</string>
 </dict>
 </plist>

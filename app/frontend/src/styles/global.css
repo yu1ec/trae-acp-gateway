@@ -1,5 +1,54 @@
+/* Shared palette. `data-theme` is painted on <html> by src/lib/theme.ts, so
+   every window (settings, logs, thoughts) resolves the same light/dark values.
+   The thoughts panel derives its own glass palette from these in thoughts.css. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+  --bg: #f6f7f8;
+  --bg-elevated: #ffffff;
+  --fg: #1f2328;
+  --fg-muted: #6b7280;
+  --border: rgba(128, 128, 128, 0.35);
+  --border-strong: rgba(128, 128, 128, 0.55);
+  --field-bg: #ffffff;
+  --hover-bg: rgba(0, 0, 0, 0.05);
+  --link: #2563eb;
+  --mark-bg: rgba(255, 212, 0, 0.55);
+  --log-error: #c4313b;
+  --log-warn: #a9600a;
+  --log-info: #1a7f4b;
+  --log-debug: #6b7280;
+  --log-error-bg: rgba(229, 72, 77, 0.1);
+  --scroll-ctl-bg: rgba(255, 255, 255, 0.92);
+  --scroll-ctl-fg: #1f2328;
+  --scroll-ctl-border: rgba(128, 128, 128, 0.45);
+  --scroll-ctl-resume-bg: rgba(46, 158, 91, 0.92);
+  --scroll-ctl-resume-fg: #ffffff;
+  --shadow: 0 10px 30px rgba(15, 23, 20, 0.16);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #17191b;
+  --bg-elevated: #212427;
+  --fg: #e7e9ea;
+  --fg-muted: #9aa0a6;
+  --border: rgba(255, 255, 255, 0.14);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --field-bg: #212427;
+  --hover-bg: rgba(255, 255, 255, 0.07);
+  --link: #6ea8fe;
+  --mark-bg: rgba(255, 212, 0, 0.35);
+  --log-error: #ff6b73;
+  --log-warn: #f0a44a;
+  --log-info: #4ade80;
+  --log-debug: #9ca3af;
+  --log-error-bg: rgba(229, 72, 77, 0.16);
+  --scroll-ctl-bg: rgba(33, 36, 39, 0.92);
+  --scroll-ctl-fg: #e7e9ea;
+  --scroll-ctl-border: rgba(255, 255, 255, 0.22);
+  --scroll-ctl-resume-bg: rgba(46, 158, 91, 0.92);
+  --scroll-ctl-resume-fg: #ffffff;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 *,
@@ -17,10 +66,18 @@ body,
 
 body {
   font: 13px -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* The thoughts window has a transparent Tauri surface; only the glass card
+   should paint, so the desktop shows through its rounded corners. */
+html[data-window="thoughts"] body {
+  background: transparent;
 }
 
 mark {
-  background: rgba(255, 212, 0, 0.45);
+  background: var(--mark-bg);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;

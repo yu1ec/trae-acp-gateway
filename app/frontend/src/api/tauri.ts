@@ -51,6 +51,8 @@ export interface UpdateCheckResult {
   release_url: string;
   installer_name: string | null;
   download_url: string | null;
+  /** True when the release ships a Tauri updater artifact (install + restart). */
+  auto_install: boolean;
 }
 
 export interface UpdateDownloadProgress {
@@ -62,6 +64,20 @@ export interface UpdateDownloadProgress {
 export interface TraeCliStatus {
   installed: boolean;
   path: string | null;
+}
+
+export type PermissionPane =
+  | "full-disk-access"
+  | "files-and-folders"
+  | "automation"
+  | "notifications";
+
+export interface PermissionStatus {
+  platform: string;
+  full_disk_access: boolean | null;
+  app_path: string;
+  translocated: boolean;
+  in_applications: boolean;
 }
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -135,6 +151,22 @@ export function checkForUpdate(): Promise<UpdateCheckResult> {
 
 export function downloadAndInstallUpdate(accelerate: boolean): Promise<void> {
   return invoke<void>("download_and_install_update", { accelerate });
+}
+
+export function getPermissionStatus(): Promise<PermissionStatus> {
+  return invoke<PermissionStatus>("get_permission_status");
+}
+
+export function openPermissionSettings(pane: PermissionPane): Promise<void> {
+  return invoke<void>("open_permission_settings", { pane });
+}
+
+export function revealAppInFinder(): Promise<void> {
+  return invoke<void>("reveal_app_in_finder");
+}
+
+export function resetMediaLibraryPermission(): Promise<void> {
+  return invoke<void>("reset_media_library_permission");
 }
 
 export function listenUpdateProgress(
@@ -264,6 +296,22 @@ export async function getCurrentMonitor(): Promise<ScreenMonitor | null> {
   if (!api) return null;
   try {
     return (await api.currentMonitor()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every monitor currently attached. Used to notice hot-plug events: while a
+ * display is being added or removed, `currentMonitor` may still point at the
+ * old layout, but this list changes right away.
+ */
+export async function getAvailableMonitors(): Promise<ScreenMonitor[] | null> {
+  const api = window.__TAURI__?.window;
+  if (!api?.availableMonitors) return null;
+  try {
+    const monitors = await api.availableMonitors();
+    return monitors.length > 0 ? monitors : null;
   } catch {
     return null;
   }

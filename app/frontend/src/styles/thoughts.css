@@ -6,7 +6,21 @@
   --paper-rgb: 11 14 13;
   --ink-rgb: 228 242 232;
   --accent: 96 240 158;
-  color-scheme: dark;
+  /* Session hue comes from the conversation id (inline style); these knobs
+     keep every derived shade legible on the current paper colour. */
+  --session-s: 70%;
+  --session-l: 62%;
+  --session-text-l: 68%;
+  --session-name-l: 76%;
+  --session-live-l: 64%;
+  --code-bg-rgb: 0 0 0;
+  --code-bg-alpha: 0.24;
+  --hl-keyword: 126 214 255;
+  --hl-string: 226 199 132;
+  --hl-number: 244 168 128;
+  --hl-attr: 198 170 255;
+  --hl-deletion: 255 150 160;
+  --thought-shadow: rgba(0, 0, 0, 0.3);
   --mono:
     ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   box-sizing: border-box;
@@ -17,6 +31,27 @@
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+/* Light paper: dark ink on a translucent light glass, with darker session and
+   syntax colours so nothing washes out against the bright desktop. */
+:root[data-theme="light"] .thoughts-window {
+  --paper-rgb: 248 250 249;
+  --ink-rgb: 24 33 29;
+  --accent: 14 126 78;
+  --session-s: 64%;
+  --session-l: 46%;
+  --session-text-l: 34%;
+  --session-name-l: 29%;
+  --session-live-l: 40%;
+  --code-bg-rgb: 18 30 24;
+  --code-bg-alpha: 0.06;
+  --hl-keyword: 12 96 160;
+  --hl-string: 122 82 8;
+  --hl-number: 160 68 12;
+  --hl-attr: 100 65 190;
+  --hl-deletion: 190 35 50;
+  --thought-shadow: rgba(20, 35, 28, 0.18);
 }
 
 .thoughts-card {
@@ -415,7 +450,7 @@
   border: 1px solid rgb(var(--accent) / 0.3);
   border-radius: 10px;
   background: rgb(var(--paper-rgb) / 0.97);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 12px 30px var(--thought-shadow);
   color: rgb(var(--ink-rgb) / 0.85);
   font-size: 11px;
   cursor: default;
@@ -511,14 +546,14 @@
   flex-shrink: 0;
   max-width: 34%;
   padding: 1px 6px;
-  border: 1px solid hsl(var(--session-hue) 70% 62% / 0.28);
+  border: 1px solid hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.28);
   border-radius: 4px;
-  background: hsl(var(--session-hue) 70% 62% / 0.08);
+  background: hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.08);
   font-family: var(--mono);
   font-size: 9px;
   line-height: 1.7;
   letter-spacing: 0.04em;
-  color: hsl(var(--session-hue) 70% 68%);
+  color: hsl(var(--session-hue) var(--session-s) var(--session-text-l));
   user-select: none;
 }
 
@@ -571,11 +606,11 @@
   margin: 0 0 10px;
   padding: 5px 9px;
   border: 0;
-  border-left: 2px solid hsl(var(--session-hue) 70% 60% / 0.5);
+  border-left: 2px solid hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.5);
   border-radius: 0 7px 7px 0;
   background: linear-gradient(
     90deg,
-    hsl(var(--session-hue) 70% 55% / 0.16),
+    hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.16),
     rgb(var(--paper-rgb) / 0.72) 62%
   );
   color: inherit;
@@ -588,10 +623,12 @@
 }
 
 .thought-group.is-live .thought-group-head {
-  border-left-color: hsl(var(--session-hue) 75% 64% / 0.9);
+  border-left-color: hsl(
+    var(--session-hue) var(--session-s) var(--session-live-l) / 0.9
+  );
   background: linear-gradient(
     90deg,
-    hsl(var(--session-hue) 70% 55% / 0.24),
+    hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.24),
     rgb(var(--paper-rgb) / 0.72) 62%
   );
 }
@@ -605,8 +642,11 @@
   width: 7px;
   height: 7px;
   border-radius: 2px;
-  background: hsl(var(--session-hue) 70% 62%);
-  box-shadow: 0 0 8px hsl(var(--session-hue) 70% 62% / 0.55);
+  background: hsl(
+    var(--session-hue) var(--session-s) var(--session-l)
+  );
+  box-shadow: 0 0 8px
+    hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.55);
 }
 
 .thought-group-name {
@@ -617,7 +657,7 @@
   font-weight: 600;
   line-height: 1.6;
   letter-spacing: 0.02em;
-  color: hsl(var(--session-hue) 72% 76%);
+  color: hsl(var(--session-hue) var(--session-s) var(--session-name-l));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -663,7 +703,7 @@
 .thought-group-summary {
   overflow: hidden;
   padding: 0 0 0 10px;
-  border-left: 1px dotted hsl(var(--session-hue) 70% 62% / 0.3);
+  border-left: 1px dotted hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.3);
   margin-left: 2px;
   font-size: 12px;
   line-height: 1.7;
@@ -742,9 +782,9 @@
 /* The turn badge and the reasoning rail carry the session colour, so a block
    is attributable even before the eye reaches the tag. */
 .thought-segment .thought-segment-index {
-  border-color: hsl(var(--session-hue) 70% 62% / 0.34);
-  background: hsl(var(--session-hue) 70% 62% / 0.08);
-  color: hsl(var(--session-hue) 70% 68%);
+  border-color: hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.34);
+  background: hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.08);
+  color: hsl(var(--session-hue) var(--session-s) var(--session-text-l));
 }
 
 .thought-segment.is-live .thought-segment-index {
@@ -810,7 +850,8 @@
 .thoughts-text {
   margin: 8px 0 0;
   padding-left: 12px;
-  border-left: 1px solid hsl(var(--session-hue) 70% 62% / 0.24);
+  border-left: 1px solid
+    hsl(var(--session-hue) var(--session-s) var(--session-l) / 0.24);
   max-width: 74ch;
   overflow-wrap: anywhere;
   font-family: inherit;
@@ -917,7 +958,7 @@
   padding: 9px 12px;
   border: 1px solid rgb(var(--accent) / 0.16);
   border-radius: 8px;
-  background: rgb(0 0 0 / 0.24);
+  background: rgb(var(--code-bg-rgb) / var(--code-bg-alpha));
   overflow-x: auto;
   scrollbar-width: thin;
   scrollbar-color: rgb(var(--ink-rgb) / 0.25) transparent;
@@ -950,20 +991,20 @@
 .thoughts-text .hljs-literal,
 .thoughts-text .hljs-type,
 .thoughts-text .hljs-doctag {
-  color: rgb(126 214 255 / 0.95);
+  color: rgb(var(--hl-keyword) / 0.95);
 }
 
 .thoughts-text .hljs-string,
 .thoughts-text .hljs-regexp,
 .thoughts-text .hljs-addition,
 .thoughts-text .hljs-attribute {
-  color: rgb(226 199 132 / 0.95);
+  color: rgb(var(--hl-string) / 0.95);
 }
 
 .thoughts-text .hljs-number,
 .thoughts-text .hljs-symbol,
 .thoughts-text .hljs-bullet {
-  color: rgb(244 168 128 / 0.95);
+  color: rgb(var(--hl-number) / 0.95);
 }
 
 .thoughts-text .hljs-title,
@@ -978,7 +1019,7 @@
 .thoughts-text .hljs-template-variable,
 .thoughts-text .hljs-selector-class,
 .thoughts-text .hljs-selector-id {
-  color: rgb(198 170 255 / 0.95);
+  color: rgb(var(--hl-attr) / 0.95);
 }
 
 .thoughts-text .hljs-meta,
@@ -987,7 +1028,7 @@
 }
 
 .thoughts-text .hljs-deletion {
-  color: rgb(255 150 160 / 0.95);
+  color: rgb(var(--hl-deletion) / 0.95);
 }
 
 .thoughts-text .hljs-emphasis {
@@ -1112,8 +1153,8 @@
   border-radius: 1px;
   background: linear-gradient(
     180deg,
-    hsl(var(--session-hue) 72% 64% / 0.85),
-    hsl(var(--session-hue) 72% 64% / 0.12)
+    hsl(var(--session-hue) var(--session-s) var(--session-live-l) / 0.85),
+    hsl(var(--session-hue) var(--session-s) var(--session-live-l) / 0.12)
   );
 }
 
@@ -1248,7 +1289,7 @@
   border-radius: 6px;
   background: rgb(var(--paper-rgb) / 0.92);
   color: rgb(var(--accent));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 6px 18px var(--thought-shadow);
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.08em;

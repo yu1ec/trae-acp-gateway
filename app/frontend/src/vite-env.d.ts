@@ -13,6 +13,7 @@ interface TauriEvent {
     event: string,
     handler: (event: TauriEventPayload<T>) => void,
   ): Promise<() => void>;
+  emit(event: string, payload?: unknown): Promise<void>;
 }
 
 interface TauriWindowSize {
@@ -48,6 +49,7 @@ interface TauriWindowHandle {
   close(): Promise<void>;
   setAlwaysOnTop(onTop: boolean): Promise<void>;
   isAlwaysOnTop(): Promise<boolean>;
+  setTheme?(theme: "light" | "dark" | null): Promise<void>;
 }
 
 interface TauriSizeCtor {
@@ -65,6 +67,7 @@ interface TauriWindowModule {
   PhysicalPosition: TauriPositionCtor;
   cursorPosition(): Promise<TauriWindowPoint | null>;
   currentMonitor(): Promise<TauriMonitor | null>;
+  availableMonitors(): Promise<TauriMonitor[]>;
 }
 
 interface TauriGlobal {
