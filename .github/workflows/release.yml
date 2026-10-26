@@ -285,7 +285,7 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          gh release download "$TAG" --pattern latest.json --dir "$tmp"
+          gh release download "$TAG" --repo "$REPO" --pattern latest.json --dir "$tmp"
           gh api "repos/$REPO/releases/tags/$TAG" > "$tmp/release.json"
 
           jq --slurpfile rel "$tmp/release.json" '
@@ -300,7 +300,7 @@ jobs:
             echo "latest.json already uses browser download URLs"
           else
             mv "$tmp/latest.new.json" "$tmp/latest.json"
-            gh release upload "$TAG" "$tmp/latest.json" --clobber
+            gh release upload "$TAG" "$tmp/latest.json" --repo "$REPO" --clobber
             echo "Rewrote latest.json download URLs"
           fi
 
