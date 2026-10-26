@@ -47,6 +47,11 @@ fn env_filter_for_level(level: &str) -> EnvFilter {
 
 type LogFilterReload = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
+/// The desktop app always launches the agent with these fixed values; the
+/// settings page only reports whether `traecli` can be found.
+const TRAE_CMD: &str = "traecli";
+const TRAE_ARGS: &[&str] = &["acp", "serve"];
+
 fn apply_log_level(reload: &LogFilterReload, level: &str) -> Result<(), String> {
     reload
         .reload(env_filter_for_level(level))
@@ -63,9 +68,6 @@ struct AppConfig {
     /// Client-reported workdirs must stay under this root.
     #[serde(default = "default_workdir_root")]
     allowed_workdir_root: String,
-    trae_cmd: String,
-    trae_args: Vec<String>,
-    sandbox: bool,
     #[serde(default = "default_log_level")]
     log_level: String,
     /// Legacy field; read from old configs only.
@@ -88,9 +90,6 @@ impl AppConfig {
             port: 60111,
             workdir: String::new(),
             allowed_workdir_root: default_workdir_root(),
-            trae_cmd: "traecli".into(),
-            trae_args: vec!["acp".into(), "serve".into()],
-            sandbox: true,
             log_level: default_log_level(),
             debug: false,
             autostart: false,
@@ -150,9 +149,11 @@ fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
         port: cfg.port,
         workdir: cfg.workdir.clone(),
         allowed_workdir_root: cfg.allowed_workdir_root.clone(),
-        trae_cmd: cfg.trae_cmd.clone(),
-        trae_args: cfg.trae_args.clone(),
-        sandbox: cfg.sandbox,
+        trae_cmd: TRAE_CMD.into(),
+        trae_args: TRAE_ARGS.iter().map(|arg| (*arg).to_string()).collect(),
+        // The app never approves sandbox-escape requests. traecli's own
+        // permission mode decides what the agent may do.
+        sandbox: true,
         debug: verbose,
         auto_check_update: false,
         no_auto_check_update: false,
@@ -216,6 +217,11 @@ const THOUGHT_EVENT_COALESCE: Duration = Duration::from_millis(40);
 /// Event name the panel listens on. The payload is empty: the listener fetches
 /// the snapshot once per frame, so no per-chunk text crosses the IPC boundary.
 const THOUGHT_EVENT: &str = "thoughts-updated";
+
+/// The OS can bring the thoughts window to the front (tray menu, window
+/// switcher) without the page knowing edge-hide parked it off-screen. This
+/// event asks the page to slide it back into view.
+const THOUGHT_REVEAL_EVENT: &str = "thoughts-reveal";
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -690,6 +696,9 @@ fn open_thoughts_window(app: &AppHandle) {
     let _ = win.unminimize();
     let _ = win.show();
     let _ = win.set_focus();
+    // A parked panel is still "shown" at an off-screen coordinate, so a tray
+    // click that only focuses it would look like nothing happened.
+    let _ = win.emit(THOUGHT_REVEAL_EVENT, ());
 }
 
 #[tauri::command]
@@ -777,26 +786,20 @@ fn trae_cli_status(cmd: &str) -> TraeCliStatus {
 }
 
 #[tauri::command]
-fn get_trae_cli_status(state: State<'_, AppState>) -> TraeCliStatus {
-    trae_cli_status(&state.cfg.lock().unwrap().trae_cmd)
+fn get_trae_cli_status() -> TraeCliStatus {
+    trae_cli_status(TRAE_CMD)
 }
 
 #[tauri::command]
-async fn install_trae_cli_command(state: State<'_, AppState>) -> Result<TraeCliStatus, String> {
-    let cmd = state.cfg.lock().unwrap().trae_cmd.clone();
-    if !trae_acp_gateway::trae_cli::is_default_traecli(&cmd) {
-        return Err(format!(
-            "当前 Trae command 为 `{cmd}`，请改为 `traecli` 后再使用自动安装"
-        ));
-    }
+async fn install_trae_cli_command() -> Result<TraeCliStatus, String> {
     tauri::async_runtime::spawn_blocking(trae_acp_gateway::trae_cli::install_trae_cli)
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    let status = trae_cli_status(&cmd);
+    let status = trae_cli_status(TRAE_CMD);
     if !status.installed {
         return Err(format!(
-            "安装脚本已执行，但仍未找到 `{cmd}`；请确认安装目录已加入 PATH，或手动指定 Trae command"
+            "安装脚本已执行，但仍未找到 `{TRAE_CMD}`；请查看官网说明手动安装，或确认安装目录已加入 PATH"
         ));
     }
     Ok(status)
@@ -1097,82 +1100,69 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
 /// user whether to run the official installer, then start the gateway anyway
 /// (the tray toggle stays usable and failures are logged clearly).
 async fn start_after_trae_cli_check(app: AppHandle) {
-    let cmd = app.state::<AppState>().cfg.lock().unwrap().trae_cmd.clone();
+    let cmd = TRAE_CMD;
 
-    if trae_acp_gateway::trae_cli::find_installed(&cmd).is_none() {
+    if trae_acp_gateway::trae_cli::find_installed(cmd).is_none() {
         tracing::warn!(cmd = %cmd, "TRAE CLI not found");
 
-        if trae_acp_gateway::trae_cli::is_default_traecli(&cmd) {
-            let dialog_app = app.clone();
-            let dialog_cmd = cmd.clone();
-            let wants_install = tauri::async_runtime::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(format!(
-                        "未检测到 TRAE CLI（`{dialog_cmd}`），Gateway 无法处理请求。\n\n是否现在自动安装？\n\n{}",
-                        trae_acp_gateway::trae_cli::install_hint()
-                    ))
-                    .title("TRAE CLI 未安装")
-                    .buttons(MessageDialogButtons::OkCancelCustom(
-                        "自动安装".into(),
-                        "稍后".into(),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+        let dialog_app = app.clone();
+        let wants_install = tauri::async_runtime::spawn_blocking(move || {
+            dialog_app
+                .dialog()
+                .message(format!(
+                    "未检测到 TRAE CLI（`{cmd}`），Gateway 无法处理请求。\n\n是否现在自动安装？\n\n{}",
+                    trae_acp_gateway::trae_cli::install_hint()
+                ))
+                .title("TRAE CLI 未安装")
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "自动安装".into(),
+                    "稍后".into(),
+                ))
+                .blocking_show()
+        })
+        .await
+        .unwrap_or(false);
 
-            if wants_install {
-                let install = tauri::async_runtime::spawn_blocking(
-                    trae_acp_gateway::trae_cli::install_trae_cli,
-                )
-                .await;
-                match install {
-                    Ok(Ok(())) if trae_acp_gateway::trae_cli::find_installed(&cmd).is_some() => {
-                        tracing::info!("TRAE CLI installed");
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("TRAE CLI 安装完成")
-                            .body("Gateway 即将启动")
-                            .show();
-                    }
-                    Ok(Ok(())) => {
-                        tracing::warn!(cmd = %cmd, "installer finished but command still missing");
-                        notify_error(
-                            &app,
-                            "TRAE CLI 未找到",
-                            &format!(
-                                "安装脚本已执行，但仍未找到 `{cmd}`。\n请确认安装目录已加入 PATH，或在设置中手动指定 Trae command。"
-                            ),
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "TRAE CLI install failed");
-                        notify_error(
-                            &app,
-                            "TRAE CLI 安装失败",
-                            &format!(
-                                "{e}\n\n可在设置页重试，或手动安装：\n{}",
-                                trae_acp_gateway::trae_cli::install_hint()
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "TRAE CLI install task failed");
-                        notify_error(&app, "TRAE CLI 安装失败", &e.to_string());
-                    }
+        if wants_install {
+            let install =
+                tauri::async_runtime::spawn_blocking(trae_acp_gateway::trae_cli::install_trae_cli)
+                    .await;
+            match install {
+                Ok(Ok(())) if trae_acp_gateway::trae_cli::find_installed(cmd).is_some() => {
+                    tracing::info!("TRAE CLI installed");
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("TRAE CLI 安装完成")
+                        .body("Gateway 即将启动")
+                        .show();
+                }
+                Ok(Ok(())) => {
+                    tracing::warn!(cmd = %cmd, "installer finished but command still missing");
+                    notify_error(
+                        &app,
+                        "TRAE CLI 未找到",
+                        &format!(
+                            "安装脚本已执行，但仍未找到 `{cmd}`。\n请确认安装目录已加入 PATH，或在设置页查看官网安装说明。"
+                        ),
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "TRAE CLI install failed");
+                    notify_error(
+                        &app,
+                        "TRAE CLI 安装失败",
+                        &format!(
+                            "{e}\n\n可在设置页重试，或手动安装：\n{}",
+                            trae_acp_gateway::trae_cli::install_hint()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "TRAE CLI install task failed");
+                    notify_error(&app, "TRAE CLI 安装失败", &e.to_string());
                 }
             }
-        } else {
-            notify_error(
-                &app,
-                "TRAE CLI 未找到",
-                &format!(
-                    "配置的 agent 命令 `{cmd}` 不存在。请在设置中检查 Trae command，或安装 TRAE CLI：\n{}",
-                    trae_acp_gateway::trae_cli::install_hint()
-                ),
-            );
         }
     }
 
@@ -1277,6 +1267,16 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
+                return;
+            }
+            // Bringing the panel forward from outside the page (window
+            // switcher, dock) does not touch the page's edge-hide state, so the
+            // window would stay parked off-screen. Treat focus as an explicit
+            // request to show it.
+            if window.label() == "thoughts" {
+                if let tauri::WindowEvent::Focused(true) = event {
+                    let _ = window.emit(THOUGHT_REVEAL_EVENT, ());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

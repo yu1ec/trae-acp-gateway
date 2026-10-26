@@ -16,9 +16,6 @@ export const LOG_LEVEL_OPTIONS: { value: LogLevelSetting; label: string }[] = [
 export interface AppConfig {
   port: number;
   workdir?: string;
-  trae_cmd: string;
-  trae_args: string[];
-  sandbox: boolean;
   log_level: LogLevelSetting;
   autostart: boolean;
   auto_check_update: boolean;
@@ -126,6 +123,18 @@ export function listenThoughts(handler: () => void): Promise<() => void> {
     return Promise.reject(new Error("Tauri event API not available"));
   }
   return tauri.event.listen("thoughts-updated", () => handler());
+}
+
+/**
+ * The window was brought forward from outside the page (tray menu, window
+ * switcher). Edge-hide uses this to slide the parked panel back on screen.
+ */
+export function listenThoughtsReveal(handler: () => void): Promise<() => void> {
+  const tauri = window.__TAURI__;
+  if (!tauri?.event) {
+    return Promise.reject(new Error("Tauri event API not available"));
+  }
+  return tauri.event.listen("thoughts-reveal", () => handler());
 }
 
 export function showSettingsWindow(): Promise<void> {
@@ -276,6 +285,17 @@ export async function getWindowRect(): Promise<WindowRect | null> {
       getCurrentMonitor(),
     ]);
     return { position, size, monitor };
+  } catch {
+    return null;
+  }
+}
+
+/** Position only; used by the drag watchdog because it polls frequently. */
+export async function getWindowPosition(): Promise<ScreenPoint | null> {
+  const win = currentWindow();
+  if (!win) return null;
+  try {
+    return await win.outerPosition();
   } catch {
     return null;
   }

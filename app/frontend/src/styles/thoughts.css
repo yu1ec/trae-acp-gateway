@@ -1301,11 +1301,68 @@
   -webkit-backdrop-filter: blur(10px);
 }
 
+/* One-time nudge for the edge-hide gesture. It reads as a toast rather than
+   another control: small, low contrast, and gone after a few seconds. */
+.thoughts-edge-tip {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 32px);
+  padding: 5px 6px 5px 12px;
+  border: 1px solid rgb(var(--accent) / 0.28);
+  border-radius: 999px;
+  background: rgb(var(--paper-rgb) / 0.92);
+  color: rgb(var(--ink-rgb) / 0.64);
+  box-shadow: 0 6px 18px var(--thought-shadow);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  white-space: nowrap;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: thoughts-tip-in 0.24s ease;
+  user-select: none;
+}
+
+.thoughts-edge-tip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgb(var(--ink-rgb) / 0.42);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.thoughts-edge-tip-close:hover {
+  background: rgb(var(--ink-rgb) / 0.08);
+  color: rgb(var(--ink-rgb) / 0.82);
+}
+
+@keyframes thoughts-tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .thoughts-marquee-track,
   .thought-segment-live,
   .thoughts-feed-dot.is-live,
-  .thoughts-viewer-empty::after {
+  .thoughts-viewer-empty::after,
+  .thoughts-edge-tip {
     animation: none;
   }
 }

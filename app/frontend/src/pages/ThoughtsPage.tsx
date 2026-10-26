@@ -14,6 +14,7 @@ import {
   closeCurrentWindow,
   getWindowScaleFactor,
   getWindowSize,
+  listenThoughtsReveal,
   openExternalUrl,
   setWindowAlwaysOnTop,
   setWindowLogicalSize,
@@ -29,6 +30,9 @@ const OPACITY_KEY = "trae-thoughts-opacity";
 const PINNED_KEY = "trae-thoughts-pinned";
 const EXPANDED_SIZE_KEY = "trae-thoughts-expanded-size";
 const HIDE_SHORT_KEY = "trae-thoughts-hide-short";
+const EDGE_TIP_KEY = "trae-thoughts-edge-tip-dismissed";
+// A nudge, not chrome: it fades on its own so it never becomes furniture.
+const EDGE_TIP_MS = 12000;
 const DEFAULT_OPACITY = 0.82;
 // The rolled-up state is a single pill; keep the logical window height in sync
 // so the transparent area does not cover the desktop behind it.
@@ -102,6 +106,22 @@ function loadHideShort(): boolean {
     return localStorage.getItem(HIDE_SHORT_KEY) === "true";
   } catch {
     return false;
+  }
+}
+
+function loadEdgeTipDismissed(): boolean {
+  try {
+    return localStorage.getItem(EDGE_TIP_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function rememberEdgeTip() {
+  try {
+    localStorage.setItem(EDGE_TIP_KEY, "true");
+  } catch {
+    // storage unavailable
   }
 }
 
@@ -601,14 +621,6 @@ const PinIcon = (
   </ToolIcon>
 );
 
-const EdgeHideIcon = (
-  <ToolIcon>
-    <rect x="3" y="4.2" width="14" height="11.6" rx="2.2" />
-    <path d="M7.3 4.6v10.8" />
-    <path d="M11.6 8.3l1.9 1.7-1.9 1.7" />
-  </ToolIcon>
-);
-
 const ClearIcon = (
   <ToolIcon>
     <path d="M4.2 5.6h11.6" />
@@ -621,11 +633,13 @@ const ClearIcon = (
 export default function ThoughtsPage() {
   const { segments, enabled, clear } = useThoughts();
   const edgeHide = useEdgeHide();
+  // Stable across renders, so the OS-event listener below binds only once.
+  const revealEdgeHidden = edgeHide.reveal;
   const [opacity, setOpacity] = useState(loadOpacity);
   const [pinPref, setPinPref] = useState(() => loadPinned() ?? true);
-  // Edge auto-hide only stays reachable while the panel sits above other
-  // windows, so the mode forces the pin on; the saved choice returns with it.
-  const pinned = edgeHide.enabled || pinPref;
+  // A snapped panel only stays reachable while it sits above other windows, so
+  // snapping forces the pin on; the saved choice applies again once detached.
+  const pinned = edgeHide.snapped || pinPref;
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
   const [updatesWhilePaused, setUpdatesWhilePaused] = useState(0);
@@ -635,6 +649,14 @@ export default function ThoughtsPage() {
   const [pinnedFocusId, setPinnedFocusId] = useState<string | null>(null);
   const [focusFolded, setFocusFolded] = useState(false);
   const [hideShort, setHideShort] = useState(loadHideShort);
+  // Edge-hide has no button, so a small tip introduces the gesture. It steps
+  // aside on its own each launch until the user dismisses it or actually snaps
+  // the panel, which then counts as "discovered".
+  const [edgeTip, setEdgeTip] = useState(() => !loadEdgeTipDismissed());
+  const dismissEdgeTip = useCallback((remember: boolean) => {
+    setEdgeTip(false);
+    if (remember) rememberEdgeTip();
+  }, []);
   // While the user reads scrolled-back history, the focus must not jump to a
   // segment streaming elsewhere; freeze the value the follow mode had.
   const frozenFocusRef = useRef<string | null>(null);
@@ -670,6 +692,27 @@ export default function ThoughtsPage() {
     };
   }, []);
 
+  // The OS can bring the window forward (tray menu, window switcher) while
+  // edge-hide has it parked off-screen. Slide it back, and hold it open until
+  // the pointer reaches the panel or the window loses focus: an activation the
+  // user asked for must never be a no-op or a blink.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void listenThoughtsReveal(() => void revealEdgeHidden(true))
+      .then((dispose) => {
+        if (cancelled) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => {
+        // No event API (browser preview); nothing to activate externally.
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [revealEdgeHidden]);
+
   // The window is created always-on-top; keep the OS state in step with the
   // derived pin flag so edge-hide can force it on and off again.
   useEffect(() => {
@@ -689,6 +732,19 @@ export default function ThoughtsPage() {
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [prefsOpen]);
+
+  // The tip behaves like a toast: it lives for one glance, and the rolled-up
+  // pill has no room for it.
+  useEffect(() => {
+    if (!edgeTip || collapsed) return;
+    const timer = window.setTimeout(() => setEdgeTip(false), EDGE_TIP_MS);
+    return () => window.clearTimeout(timer);
+  }, [edgeTip, collapsed]);
+
+  // Snapping the panel is the user using the feature; stop nudging them.
+  useEffect(() => {
+    if (edgeHide.snapped) dismissEdgeTip(true);
+  }, [edgeHide.snapped, dismissEdgeTip]);
 
   const stopScrollAnimation = useCallback(() => {
     if (scrollAnimRef.current) {
@@ -856,12 +912,6 @@ export default function ThoughtsPage() {
     setFollowing(true);
     setUpdatesWhilePaused(0);
     void clear();
-  };
-
-  // The appearance popover would be left floating over a docked panel.
-  const handleEdgeHide = () => {
-    setPrefsOpen(false);
-    void edgeHide.toggle();
   };
 
   // The appearance popover does not fit in the pill, so revealing it also
@@ -1097,7 +1147,7 @@ export default function ThoughtsPage() {
       style={panelStyle}
       data-tauri-drag-region="deep"
     >
-      {edgeHide.enabled && (
+      {edgeHide.snapped && (
         <button
           type="button"
           className={`thoughts-edge-hotzone is-${edgeHide.side}${
@@ -1130,17 +1180,17 @@ export default function ThoughtsPage() {
               type="button"
               className={`thoughts-icon-btn${pinned ? " is-active" : ""}`}
               onClick={handlePin}
-              disabled={edgeHide.enabled}
+              disabled={edgeHide.snapped}
               title={
-                edgeHide.enabled
-                  ? "贴边隐藏时始终置顶"
+                edgeHide.snapped
+                  ? "吸附贴边时始终置顶"
                   : pinned
                     ? "取消置顶"
                     : "置顶"
               }
               aria-label={
-                edgeHide.enabled
-                  ? "贴边隐藏时始终置顶"
+                edgeHide.snapped
+                  ? "吸附贴边时始终置顶"
                   : pinned
                     ? "取消置顶"
                     : "置顶"
@@ -1148,21 +1198,6 @@ export default function ThoughtsPage() {
               aria-pressed={pinned}
             >
               {PinIcon}
-            </button>
-
-            <button
-              type="button"
-              className={`thoughts-icon-btn${edgeHide.enabled ? " is-active" : ""}`}
-              onClick={handleEdgeHide}
-              title={
-                edgeHide.enabled
-                  ? "关闭贴边隐藏"
-                  : "贴边隐藏（鼠标移开后自动收起）"
-              }
-              aria-label={edgeHide.enabled ? "关闭贴边隐藏" : "贴边隐藏"}
-              aria-pressed={edgeHide.enabled}
-            >
-              {EdgeHideIcon}
             </button>
 
             <div className="thoughts-prefs-wrap" ref={prefsRef}>
@@ -1384,6 +1419,21 @@ export default function ThoughtsPage() {
             ↓ 继续滚动
             {updatesWhilePaused > 0 ? " · 有新内容" : ""}
           </button>
+        )}
+
+        {edgeTip && !collapsed && (
+          <div className="thoughts-edge-tip" data-tauri-drag-region="false">
+            <span>拖到屏幕左/右边缘可自动隐藏</span>
+            <button
+              type="button"
+              className="thoughts-edge-tip-close"
+              onClick={() => dismissEdgeTip(true)}
+              title="知道了"
+              aria-label="知道了"
+            >
+              ×
+            </button>
+          </div>
         )}
 
       </div>

@@ -267,9 +267,19 @@ App 设置页提供：
 
 App 配置保存在 `{app_data_dir}/config.json`，字段 `auto_check_update`（默认 `false`）。
 
+App 固定使用 `traecli acp serve` 启动 agent，不再提供 Trae command / Trae args 输入框。设置页只显示是否检测到 `traecli`：未检测到时可点击按钮运行官方安装脚本，安装完成后状态会自动刷新；安装失败时会给出官网安装说明链接，可手动安装。
+
+App 不单独提供 Sandbox 开关：沙箱与审批策略由 `traecli` 自身的权限模式决定，网关只负责拒绝 agent 越出沙箱的权限请求。如需使用 `--permission-mode` 等参数调整权限模式，请改用命令行形态的 `--trae-args`：
+
+- `--trae-args=acp,serve`（默认）：Workspace Edit / Auto-Review 等 traecli 自身默认模式
+- `--trae-args=--permission-mode,auto,acp,serve`：Auto-Review 模式，仍在沙箱内，关键操作由模型自动评审
+- `--trae-args=--permission-mode,bypass_permissions,acp,serve` 或 `--trae-args=acp,serve,-y`：Full Access，关闭沙箱和审批，风险最高
+
 ### 思考面板
 
 设置页勾选 **启用思考面板** 并保存后，可从设置页的「打开思考面板」或托盘菜单的 **Open Thoughts** 打开一个置顶悬浮面板。面板实时滚动显示 ACP `agent_thought_chunk` 思考流，支持面板内调整透明度，以及通过图钉按钮切换是否置顶。
+
+把面板拖到任意显示器的左边缘或右边缘即自动吸附：鼠标移开后只留一条可悬停的细条，悬停细条会重新滑出。从吸附状态拖动面板会自动解除吸附，拖回左/右边缘则重新吸附，因此不需要额外的开关按钮。
 
 多个客户端会话并发时，同一会话的思考使用相同颜色和短标签，交错输出也能一眼看出归属。Claude Code 会自动通过 `X-Claude-Code-Session-Id` 上报会话 ID；其他客户端可使用 `X-Session-Id` / `X-Conversation-Id`，或 Anthropic 请求体的 `metadata.session_id`。未上报会话 ID 的请求标记为「未标记」。
 
