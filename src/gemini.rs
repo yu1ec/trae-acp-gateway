@@ -224,6 +224,16 @@ pub async fn generate_content(
     .await
     {
         Ok((_, outcome)) => {
+            if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                tracing::warn!(
+                    stop_reason = %outcome.stop_reason,
+                    "agent ended turn prematurely"
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(gemini_error(message, 502)),
+                ));
+            }
             let body = generate_response(
                 &outcome.text,
                 if thought.is_empty() {
@@ -292,9 +302,20 @@ pub async fn stream_generate_content(
             },
         )
         .await;
-        if let Err(e) = result {
-            tracing::error!(error = %e, "gemini stream failed");
-            let _ = send(gemini_error(&e.to_string(), 500));
+        match result {
+            Ok((_, outcome)) => {
+                if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                    tracing::warn!(
+                        stop_reason = %outcome.stop_reason,
+                        "agent ended turn prematurely"
+                    );
+                    let _ = send(gemini_error(message, 502));
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "gemini stream failed");
+                let _ = send(gemini_error(&e.to_string(), 500));
+            }
         }
     });
 

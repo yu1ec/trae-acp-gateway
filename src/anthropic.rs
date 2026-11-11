@@ -111,27 +111,10 @@ fn stop_reason(acp: &str) -> &'static str {
         "max_tokens" => "max_tokens",
         "refusal" => "refusal",
         "end_turn" => "end_turn",
-        // Anthropic has no equivalent for these ACP reasons. `cancelled` and
-        // `max_turn_requests` both mean the turn ended prematurely, so surface
-        // them in the logs instead of silently reporting a clean end_turn.
-        "cancelled" => {
-            tracing::warn!(
-                stop_reason = acp,
-                "agent turn was cancelled; reporting end_turn"
-            );
-            "end_turn"
-        }
-        "max_turn_requests" => {
-            tracing::warn!(
-                stop_reason = acp,
-                "agent hit its max turn request limit; reporting end_turn"
-            );
-            "end_turn"
-        }
         other => {
-            tracing::warn!(
-                stop_reason = other,
-                "unknown ACP stop reason; reporting end_turn"
+            debug_assert!(
+                crate::acp::turn_ended_cleanly(other),
+                "stop_reason called on premature ACP stop: {other}"
             );
             "end_turn"
         }
@@ -450,6 +433,16 @@ async fn messages_buffered(
     .await
     {
         Ok((_, outcome)) => {
+            if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                tracing::warn!(
+                    stop_reason = %outcome.stop_reason,
+                    "agent ended turn prematurely"
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(error_response(message, "api_error")),
+                ));
+            }
             let body = message_response(
                 &id,
                 &model,
@@ -546,6 +539,18 @@ async fn messages_stream(
             Ok((_, outcome)) => {
                 for payload in blocks_out.close(&id) {
                     let _ = send(sse_event(payload));
+                }
+                if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                    tracing::warn!(
+                        stop_reason = %outcome.stop_reason,
+                        "agent ended turn prematurely"
+                    );
+                    let _ = send(
+                        Event::default()
+                            .event("error")
+                            .data(error_response(message, "api_error").to_string()),
+                    );
+                    return;
                 }
                 let finish = stop_reason(&outcome.stop_reason);
                 let usage = usage_json(outcome.usage.as_ref());
@@ -653,9 +658,14 @@ mod tests {
         assert_eq!(stop_reason("max_tokens"), "max_tokens");
         assert_eq!(stop_reason("refusal"), "refusal");
         assert_eq!(stop_reason("end_turn"), "end_turn");
-        assert_eq!(stop_reason("cancelled"), "end_turn");
-        assert_eq!(stop_reason("max_turn_requests"), "end_turn");
-        assert_eq!(stop_reason("something_new"), "end_turn");
+    }
+
+    #[test]
+    fn premature_stops_are_not_mapped_to_end_turn() {
+        assert!(crate::acp::premature_stop_message("cancelled").is_some());
+        assert!(crate::acp::premature_stop_message("max_turn_requests").is_some());
+        assert!(crate::acp::premature_stop_message("unknown").is_some());
+        assert!(crate::acp::premature_stop_message("end_turn").is_none());
     }
 
     #[test]

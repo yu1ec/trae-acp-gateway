@@ -6,26 +6,32 @@ cd "$ROOT"
 
 DRY_RUN=0
 BUMP=""
+GENERATE_NOTES=1
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/release.sh <type> [--dry-run]
+Usage: scripts/release.sh <type> [--dry-run] [--no-notes]
 
 Types:
   patch / fix / bug / 修复       Bug fix:         0.1.2 -> 0.1.3
   minor / feature / feat / 功能  New feature:     0.1.2 -> 0.2.0
   major / breaking / 大版本      Breaking change: 0.1.2 -> 1.0.0
 
+Options:
+  --dry-run    Preview the version bump without changing files
+  --no-notes   Skip generating release-notes/v<version>.md
+
 Examples:
   make release TYPE=patch
   make release TYPE=minor DRY_RUN=1
-  ./scripts/release.sh fix --dry-run
+  ./scripts/release.sh fix --dry-run --no-notes
 EOF
 }
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --no-notes) GENERATE_NOTES=0 ;;
     -h|--help)
       usage
       exit 0
@@ -112,6 +118,14 @@ if [[ "$DRY_RUN" == "1" ]]; then
 else
   "$(dirname "$0")/bump-version.sh" "$NEXT"
   "$(dirname "$0")/check-version.sh" "$NEXT"
+
+  if [[ "$GENERATE_NOTES" == "1" ]]; then
+    echo ""
+    if ! bash "$(dirname "$0")/release-notes.sh" "$NEXT"; then
+      echo "Warning: failed to generate release notes. Run it manually later:" >&2
+      echo "  scripts/release-notes.sh $NEXT" >&2
+    fi
+  fi
 fi
 
 echo ""
@@ -120,3 +134,7 @@ echo "  git add -A"
 echo "  git commit -m \"chore: release v$NEXT\""
 echo "  git tag v$NEXT"
 echo "  git push origin HEAD --tags"
+echo ""
+echo "Release notes are applied by CI after the release is created."
+echo "To regenerate or edit them: scripts/release-notes.sh $NEXT"
+echo "To push edited notes to an existing release: scripts/release-notes.sh $NEXT --publish"

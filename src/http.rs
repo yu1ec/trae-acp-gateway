@@ -368,6 +368,16 @@ pub async fn chat_completions(
 
         match result {
             Ok((_, outcome)) => {
+                if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                    tracing::warn!(
+                        stop_reason = %outcome.stop_reason,
+                        "agent ended turn prematurely"
+                    );
+                    let _ = tx.send(Ok(Event::default()
+                        .event("error")
+                        .data(error_response(message, 500).to_string())));
+                    return;
+                }
                 let _ = tx.send(Ok(Event::default().data(
                     chat_chunk(
                         &completion_id,
@@ -425,12 +435,24 @@ pub async fn chat_completions_buffered(
     )
     .await
     {
-        Ok((_, outcome)) => Ok(Json(chat_response(
-            &completion_id,
-            &outcome.text,
-            finish_reason(&outcome.stop_reason),
-            outcome.usage.as_ref(),
-        ))),
+        Ok((_, outcome)) => {
+            if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                tracing::warn!(
+                    stop_reason = %outcome.stop_reason,
+                    "agent ended turn prematurely"
+                );
+                return Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    Json(error_response(message, 502)),
+                ));
+            }
+            Ok(Json(chat_response(
+                &completion_id,
+                &outcome.text,
+                finish_reason(&outcome.stop_reason),
+                outcome.usage.as_ref(),
+            )))
+        }
         Err(e) => {
             tracing::error!(error = %e, "turn failed");
             Err((

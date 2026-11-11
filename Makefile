@@ -41,7 +41,7 @@ SIGN_IDENTITY ?=
 # INIT_TARGETS=all adds all common rustup targets during init
 INIT_TARGETS ?= current
 
-.PHONY: help init init-rust init-tauri init-frontend icons build-cli build-frontend build-app dev-app run-cli release bump-version check-version signing-cert updater-key clean
+.PHONY: help init init-rust init-tauri init-frontend icons build-cli build-frontend build-app dev-app run-cli release notes bump-version check-version signing-cert updater-key clean
 
 .DEFAULT_GOAL := help
 
@@ -56,7 +56,8 @@ help:
 	@echo "  build-app   Build desktop app ($(APP_NAME)) installers"
 	@echo "  dev-app     Run Tauri dev server (hot reload)"
 	@echo "  run-cli     Build (if needed) and run CLI gateway"
-	@echo "  release       Auto bump version by type and print git tag commands"
+	@echo "  release       Auto bump version, generate release notes, print git tag commands"
+	@echo "  notes         Generate release notes for a version (AI-assisted)"
 	@echo "  bump-version  Sync version to an explicit version"
 	@echo "  check-version Validate version matches tag (CI check)"
 	@echo "  signing-cert  Generate/import the macOS self-signed code-signing certificate"
@@ -72,7 +73,10 @@ help:
 	@echo "  INIT_TARGETS  current | all  (default: current)"
 	@echo "  TYPE        Release bump type: patch | minor | major (for release)"
 	@echo "  DRY_RUN     1=preview release without changing files"
-	@echo "  VERSION     Target version for bump-version (e.g. 0.1.2)"
+	@echo "  VERSION     Target version for bump-version / notes (e.g. 0.1.2)"
+	@echo "  NO_AI       1=build notes from commit subjects without AI"
+	@echo "  PUBLISH     1=publish generated notes to an existing GitHub Release"
+	@echo "  FROM        Previous tag for notes (default: latest reachable tag)"
 	@echo "  TAG         Tag version for check-version (default: current git tag)"
 	@echo ""
 	@echo "Examples:"
@@ -89,6 +93,9 @@ help:
 	@echo "  make run-cli"
 	@echo "  make release TYPE=patch"
 	@echo "  make release TYPE=minor DRY_RUN=1"
+	@echo "  make notes VERSION=0.1.2"
+	@echo "  make notes VERSION=0.1.2 NO_AI=1"
+	@echo "  make notes VERSION=0.1.2 PUBLISH=1"
 	@echo "  make bump-version VERSION=0.1.2"
 	@echo "  make check-version TAG=0.1.2"
 	@echo ""
@@ -222,6 +229,16 @@ release:
 	else \
 		./scripts/release.sh "$(TYPE)"; \
 	fi
+
+notes:
+	@args=""; \
+	if [ -n "$(VERSION)" ]; then args="$$args $(VERSION)"; fi; \
+	if [ -n "$(FROM)" ]; then args="$$args --from $(FROM)"; fi; \
+	if [ -n "$(EFFORT)" ]; then args="$$args --effort $(EFFORT)"; fi; \
+	if [ "$(NO_AI)" = "1" ]; then args="$$args --no-ai"; fi; \
+	if [ "$(PUBLISH)" = "1" ]; then args="$$args --publish"; fi; \
+	if [ "$(DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	bash scripts/release-notes.sh $$args
 
 bump-version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump-version VERSION=0.1.2" >&2; exit 1)

@@ -68,22 +68,43 @@ impl Policy {
     }
 }
 
-/// Pick the first option whose `kind` starts with `want` (allow_/reject_),
-/// falling back to the first listed option. Never hardcode ids.
+fn permission_kind(option: &Value) -> Option<&str> {
+    option.get("kind").and_then(Value::as_str)
+}
+
+/// Pick an allow/reject option. For allows, prefer durable `allow_always` so
+/// ACP clients do not stall on repeated sandbox-escape prompts.
 fn choose_permission_option(params: &Value, want: &str) -> Value {
     let options = params
         .get("options")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let chosen = options
-        .iter()
-        .find(|o| {
-            o.get("kind")
-                .and_then(Value::as_str)
-                .is_some_and(|k| k.starts_with(want))
-        })
-        .or_else(|| options.first());
+    let chosen = if want == "allow" {
+        options
+            .iter()
+            .find(|o| permission_kind(o) == Some("allow_always"))
+            .or_else(|| {
+                options
+                    .iter()
+                    .find(|o| permission_kind(o) == Some("allow_once"))
+            })
+            .or_else(|| {
+                options
+                    .iter()
+                    .find(|o| permission_kind(o).is_some_and(|k| k.starts_with("allow")))
+            })
+    } else {
+        options
+            .iter()
+            .find(|o| permission_kind(o) == Some("reject_once"))
+            .or_else(|| {
+                options
+                    .iter()
+                    .find(|o| permission_kind(o).is_some_and(|k| k.starts_with("reject")))
+            })
+    }
+    .or_else(|| options.first());
     match chosen.and_then(|o| o.get("optionId").and_then(Value::as_str)) {
         Some(option_id) => json!({
             "outcome": { "outcome": "selected", "optionId": option_id }
@@ -91,6 +112,12 @@ fn choose_permission_option(params: &Value, want: &str) -> Value {
         // Malformed request: no options at all. Fail visibly.
         None => error_result(-32602, "no permission options provided"),
     }
+}
+
+fn is_json_rpc_error_payload(value: &Value) -> bool {
+    value.get("outcome").is_none()
+        && value.get("code").and_then(|c| c.as_i64()).is_some()
+        && value.get("message").and_then(|m| m.as_str()).is_some()
 }
 
 fn error_result(code: i64, message: &str) -> Value {
@@ -498,8 +525,12 @@ impl AgentProcess {
         Ok(())
     }
 
-    async fn reply(&mut self, id: Id, result: Value) -> anyhow::Result<()> {
-        let frame = json!({ "jsonrpc": "2.0", "id": id.to_value(), "result": result });
+    async fn reply(&mut self, id: Id, answer: Value) -> anyhow::Result<()> {
+        let frame = if is_json_rpc_error_payload(&answer) {
+            json!({ "jsonrpc": "2.0", "id": id.to_value(), "error": answer })
+        } else {
+            json!({ "jsonrpc": "2.0", "id": id.to_value(), "result": answer })
+        };
         tracing::debug!(line = %frame, "-> agent");
         self.stdin
             .write_all(format!("{frame}\n").as_bytes())
@@ -627,6 +658,23 @@ mod tests {
         ]));
         let answer = Policy::ApproveAll.answer("session/request_permission", &params);
         assert_eq!(outcome_option_id(answer), "allow-once");
+    }
+
+    #[test]
+    fn approve_all_policy_prefers_allow_always() {
+        let params = perm_request(json!([
+            { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+            { "optionId": "allow-always", "name": "Allow always", "kind": "allow_always" }
+        ]));
+        let answer = Policy::ApproveAll.answer("session/request_permission", &params);
+        assert_eq!(outcome_option_id(answer), "allow-always");
+    }
+
+    #[test]
+    fn permission_errors_are_json_rpc_errors_not_results() {
+        let payload = super::error_result(-32602, "no permission options provided");
+        assert!(super::is_json_rpc_error_payload(&payload));
+        assert!(payload.get("outcome").is_none());
     }
 
     #[test]

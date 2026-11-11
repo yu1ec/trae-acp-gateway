@@ -305,3 +305,36 @@ jobs:
           fi
 
           jq . "$tmp/latest.json"
+
+  release-notes:
+    name: Apply curated release notes
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply release-notes/v<tag>.md
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::notice::未找到 $notes，保留 tauri-action 的默认 release body。"
+            echo "运行 scripts/release-notes.sh $GITHUB_REF_NAME 生成后提交即可。"
+            exit 0
+          fi
+          for attempt in 1 2 3 4 5; do
+            if gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"; then
+              echo "Release notes applied: $notes"
+              exit 0
+            fi
+            echo "Release not ready yet (attempt $attempt), retrying..."
+            sleep 5
+          done
+          echo "::error::无法写入 Release notes，请手动执行 gh release edit $GITHUB_REF_NAME --notes-file $notes"
+          exit 1

@@ -118,3 +118,22 @@ pub struct TurnOutcome {
     /// Token accounting from the prompt response, when the agent reports it.
     pub usage: Option<Usage>,
 }
+
+/// Whether the agent reported a normal end to the turn.
+pub fn turn_ended_cleanly(stop_reason: &str) -> bool {
+    matches!(stop_reason, "end_turn" | "max_tokens" | "refusal")
+}
+
+/// Explanation for stops that should not be surfaced to HTTP clients as success.
+pub fn premature_stop_message(stop_reason: &str) -> Option<&'static str> {
+    match stop_reason {
+        "cancelled" => Some(
+            "agent turn was cancelled before completion (for example permission denied or interrupted)",
+        ),
+        "max_turn_requests" => Some("agent reached its max turn request limit"),
+        other if !turn_ended_cleanly(other) => {
+            Some("agent ended the turn with an unexpected stop reason")
+        }
+        _ => None,
+    }
+}

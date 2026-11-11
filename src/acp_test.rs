@@ -30,6 +30,14 @@ fn agent_thought_chunk_deserializes() {
 }
 
 #[test]
+fn premature_stop_reasons_are_not_clean() {
+    assert!(crate::acp::turn_ended_cleanly("end_turn"));
+    assert!(!crate::acp::turn_ended_cleanly("cancelled"));
+    assert!(crate::acp::premature_stop_message("cancelled").is_some());
+    assert!(crate::acp::premature_stop_message("end_turn").is_none());
+}
+
+#[test]
 fn usage_struct_maps_acp_fields() {
     let u: crate::acp::Usage = serde_json::from_value(serde_json::json!({
         "totalTokens": 21330, "inputTokens": 21311, "outputTokens": 19,

@@ -339,7 +339,24 @@ make release TYPE=patch DRY_RUN=1
 
 也支持别名：`fix` / `bug` / `feature` / `feat` / `breaking`，以及中文 `修复` / `功能` / `大版本`。
 
-命令会更新所有版本文件，并输出你需要手动执行的 `git commit` / `git tag` / `git push` 命令。
+命令会更新所有版本文件、生成 `release-notes/v<version>.md`，并输出你需要手动执行的 `git commit` / `git tag` / `git push` 命令。
+
+### 发布说明（Release Notes）
+
+`scripts/release-notes.sh` 会读取上一个 tag 到当前 HEAD 之间的提交，以及工作区里尚未提交/尚未跟踪的改动，生成面向用户的中文更新说明，写入 `release-notes/v<version>.md`：
+
+```bash
+make release TYPE=minor              # 升版本并自动生成 release-notes/v0.13.0.md
+make notes VERSION=0.13.0            # 单独生成或重新生成
+make notes VERSION=0.13.0 NO_AI=1    # 不调用 AI，直接按提交标题归类
+make notes VERSION=0.13.0 PUBLISH=1  # 直接推送到已存在的 GitHub Release
+make notes VERSION=0.13.0 EFFORT=medium  # 覆盖默认的 high effort
+scripts/release-notes.sh 0.13.0 --dry-run   # 只打印，不写文件
+```
+
+默认调用 `claude -p --effort high` 生成说明——`--effort high` 只作用于这次的 AI 调用，不影响你交互式会话的 effort 设置。可以用 `AI_EFFORT` / `--effort` 改级别（`low|medium|high|xhigh|max`，传 `none` 则不传该参数、沿用 CLI 默认）；也可以用 `AI_CMD` 指定任意命令（从 stdin 读取 prompt，向 stdout 输出 Markdown），或用 `AI_MODEL` / `--model` 指定模型。AI 不可用时会退化为按提交标题生成。
+
+生成的文件随 tag 一起提交，CI 在 Release 创建完成后会自动用 `release-notes/v<tag>.md` 覆盖 tauri-action 的默认正文。AI 生成的内容建议先人工检查再提交。
 
 如需指定确切版本，仍可使用：
 
@@ -453,6 +470,8 @@ CLI 二进制不再随 Release 发布。如仍需使用，请参考「打包 CLI
 │   ├── ui/           # 前端构建产物（gitignore）
 │   └── tauri.conf.json
 ├── .github/workflows/  # CI / Release 工作流
+├── release-notes/    # 随 tag 提交的 GitHub Release 正文
+├── scripts/          # 升版本、release-notes、签名密钥
 ├── run.sh            # CLI 快速启动脚本
 ├── Makefile          # 统一构建入口
 └── Cargo.toml        # Workspace 配置

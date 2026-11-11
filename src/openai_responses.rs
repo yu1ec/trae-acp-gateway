@@ -312,6 +312,16 @@ async fn responses_buffered(
     .await
     {
         Ok((_, outcome)) => {
+            if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                tracing::warn!(
+                    stop_reason = %outcome.stop_reason,
+                    "agent ended turn prematurely"
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(error_response(message, 502)),
+                ));
+            }
             let body = build_response(&id, &model, &outcome.text, outcome.usage.as_ref());
             let transcript = format!(
                 "{prev}{}User: {input_summary}\nAssistant: {}\n",
@@ -428,6 +438,18 @@ async fn responses_stream(
 
         match result {
             Ok((_, outcome)) => {
+                if let Some(message) = crate::acp::premature_stop_message(&outcome.stop_reason) {
+                    tracing::warn!(
+                        stop_reason = %outcome.stop_reason,
+                        "agent ended turn prematurely"
+                    );
+                    let _ = send(
+                        Event::default()
+                            .event("error")
+                            .data(error_response(message, 502).to_string()),
+                    );
+                    return;
+                }
                 let text = if text_buf.is_empty() {
                     outcome.text.clone()
                 } else {

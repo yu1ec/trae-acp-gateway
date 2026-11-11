@@ -151,9 +151,9 @@ fn to_gateway(cfg: &AppConfig) -> GatewayConfig {
         allowed_workdir_root: cfg.allowed_workdir_root.clone(),
         trae_cmd: TRAE_CMD.into(),
         trae_args: TRAE_ARGS.iter().map(|arg| (*arg).to_string()).collect(),
-        // The app never approves sandbox-escape requests. traecli's own
-        // permission mode decides what the agent may do.
-        sandbox: true,
+        // Auto-approve ACP permission prompts (e.g. sandbox escape) because
+        // Claude Code / Orca have no UI for traecli's on-request reviewer.
+        sandbox: false,
         debug: verbose,
         auto_check_update: false,
         no_auto_check_update: false,
